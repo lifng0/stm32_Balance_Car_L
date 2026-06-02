@@ -46,6 +46,7 @@
 ..\obj\encoder.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\encoder.o: ..\BSP\Key\bsp_key.h
 ..\obj\encoder.o: ..\BSP\Usart1\usart.h
+..\obj\encoder.o: ..\BSP\bsp_pi_comm.h
 ..\obj\encoder.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\encoder.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\encoder.o: ..\BSP\Usart1\bsp_usart2.h

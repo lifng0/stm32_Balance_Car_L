@@ -45,6 +45,7 @@
 ..\obj\inv_mpu.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\inv_mpu.o: ..\BSP\Key\bsp_key.h
 ..\obj\inv_mpu.o: ..\BSP\Usart1\usart.h
+..\obj\inv_mpu.o: ..\BSP\bsp_pi_comm.h
 ..\obj\inv_mpu.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\inv_mpu.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\inv_mpu.o: ..\BSP\Usart1\bsp_usart2.h

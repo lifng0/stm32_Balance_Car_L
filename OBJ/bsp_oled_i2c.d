@@ -46,6 +46,7 @@
 ..\obj\bsp_oled_i2c.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\bsp_oled_i2c.o: ..\BSP\Key\bsp_key.h
 ..\obj\bsp_oled_i2c.o: ..\BSP\Usart1\usart.h
+..\obj\bsp_oled_i2c.o: ..\BSP\bsp_pi_comm.h
 ..\obj\bsp_oled_i2c.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\bsp_oled_i2c.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\bsp_oled_i2c.o: ..\BSP\Usart1\bsp_usart2.h

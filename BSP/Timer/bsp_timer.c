@@ -77,6 +77,8 @@ void TIM6_IRQHandler(void)
 		{
 			stop_time --;
 		}
+
+		PI_Comm_10ms_Task();
 		
 		if(mode == Normal || mode == Weight_M)
 		{ 

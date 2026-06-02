@@ -39,6 +39,7 @@
 
 //Usart
 #include "usart.h"	
+#include "bsp_pi_comm.h"
 
 //bluetooth
 #include "bsp_bluetooth.h"

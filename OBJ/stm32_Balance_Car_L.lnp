@@ -37,6 +37,7 @@
 "..\obj\bsp_key.o"
 "..\obj\bsp_bluetooth.o"
 "..\obj\bsp_usart2.o"
+"..\obj\bsp_pi_comm.o"
 "..\obj\app_control.o"
 "..\obj\app_motor.o"
 "..\obj\pid_control.o"

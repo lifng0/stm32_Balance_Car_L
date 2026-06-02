@@ -46,6 +46,7 @@
 ..\obj\motor.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\motor.o: ..\BSP\Key\bsp_key.h
 ..\obj\motor.o: ..\BSP\Usart1\usart.h
+..\obj\motor.o: ..\BSP\bsp_pi_comm.h
 ..\obj\motor.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\motor.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\motor.o: ..\BSP\Usart1\bsp_usart2.h

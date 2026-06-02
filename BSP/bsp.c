@@ -21,7 +21,8 @@ void bsp_init(void)
 	Encoder_Init_TIM4();            //初始化编码器4  Initialize encoder 4
 	
 	uart_init(115200);	            //串口1初始化  Serial port 1 initialization
-	
+	PI_Comm_Init(115200);	         //树莓派通信串口初始化  Raspberry Pi communication UART
+
 	delay_ms(300);
 	
 	IIC_MPU6050_Init();							//陀螺仪i2c初始化   Gyroscope I2C initialization

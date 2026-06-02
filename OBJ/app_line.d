@@ -46,6 +46,7 @@
 ..\obj\app_line.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\app_line.o: ..\BSP\Key\bsp_key.h
 ..\obj\app_line.o: ..\BSP\Usart1\usart.h
+..\obj\app_line.o: ..\BSP\bsp_pi_comm.h
 ..\obj\app_line.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\app_line.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\app_line.o: ..\BSP\Usart1\bsp_usart2.h

@@ -46,6 +46,7 @@
 ..\obj\pid_control.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\pid_control.o: ..\BSP\Key\bsp_key.h
 ..\obj\pid_control.o: ..\BSP\Usart1\usart.h
+..\obj\pid_control.o: ..\BSP\bsp_pi_comm.h
 ..\obj\pid_control.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\pid_control.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\pid_control.o: ..\BSP\Usart1\bsp_usart2.h

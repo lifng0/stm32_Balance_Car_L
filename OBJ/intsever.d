@@ -46,6 +46,7 @@
 ..\obj\intsever.o: ..\BSP\Timer\bsp_timer.h
 ..\obj\intsever.o: ..\BSP\Key\bsp_key.h
 ..\obj\intsever.o: ..\BSP\Usart1\usart.h
+..\obj\intsever.o: ..\BSP\bsp_pi_comm.h
 ..\obj\intsever.o: ..\BSP\Bluetooth\bsp_bluetooth.h
 ..\obj\intsever.o: ..\BSP\Bluetooth\app_bluetooth.h
 ..\obj\intsever.o: ..\BSP\Usart1\bsp_usart2.h

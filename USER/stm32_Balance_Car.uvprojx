@@ -599,6 +599,11 @@
               <FileType>1</FileType>
               <FilePath>..\BSP\Usart1\bsp_usart2.c</FilePath>
             </File>
+            <File>
+              <FileName>bsp_pi_comm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\bsp_pi_comm.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
