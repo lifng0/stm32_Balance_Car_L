@@ -17,6 +17,8 @@ extern K210_Data_t K210_data;
 void Deal_K210_AI(uint8_t recv_msg);
 void Get_K210_Data(void);
 float APP_K210Y_PID_Calc(float actual_value);
+uint8_t K210_HasAISnapshot(void);
+void K210_GetAISnapshot(K210_Data_t *snapshot);
 
 #endif
 

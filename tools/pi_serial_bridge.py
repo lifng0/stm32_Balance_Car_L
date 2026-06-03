@@ -17,12 +17,22 @@ CMD_SET_MOVE = 0x04
 CMD_QUERY_STATUS = 0x05
 CMD_HEARTBEAT = 0x06
 CMD_EMERGENCY_STOP = 0x07
+CMD_SET_HOST_STATE = 0x08
+CMD_QUERY_VISION = 0x09
+CMD_K210_TEXT = 0x0A
 
 CMD_ACK = 0x81
 CMD_NACK = 0x82
 CMD_STATUS = 0x83
 CMD_EVENT = 0x84
 CMD_HEARTBEAT_ACK = 0x85
+CMD_VISION_STATUS = 0x86
+
+VISION_TYPE_NAME = {
+    0: "NONE",
+    1: "TEXT",
+    2: "AI",
+}
 
 MODE_NAME = {
     0: "Normal",
@@ -38,6 +48,11 @@ EVENT_NAME = {
     1: "LOW_POWER",
     2: "POWER_RECOVER",
     4: "TIMEOUT_STOP",
+    0x10: "START_REQUEST",
+    0x11: "MODE_SELECT",
+    0x12: "STOP_ASSERT",
+    0x13: "STOP_CLEAR",
+    0x14: "SHUTDOWN_REQUEST",
 }
 
 ERROR_NAME = {
@@ -176,6 +191,29 @@ def decode_frame(frame) -> str:
     if cmd == CMD_HEARTBEAT_ACK:
         return f"HEARTBEAT_ACK seq={frame['seq']}"
 
+    if cmd == CMD_VISION_STATUS and len(payload) >= 3:
+        vision_type = payload[0]
+        mode = payload[1]
+        valid = payload[2]
+        if vision_type == 1 and len(payload) >= 4:
+            text_len = payload[3]
+            text = payload[4 : 4 + text_len].decode("utf-8", errors="replace")
+            return (
+                f"VISION_STATUS type={VISION_TYPE_NAME.get(vision_type, vision_type)} "
+                f"mode={MODE_NAME.get(mode, mode)} valid={valid} text={text!r}"
+            )
+        if vision_type == 2 and len(payload) >= 13:
+            x, y, w, h, area = struct.unpack_from("<HHHHH", payload, 3)
+            return (
+                f"VISION_STATUS type={VISION_TYPE_NAME.get(vision_type, vision_type)} "
+                f"mode={MODE_NAME.get(mode, mode)} valid={valid} "
+                f"x={x} y={y} w={w} h={h} area={area}"
+            )
+        return (
+            f"VISION_STATUS type={VISION_TYPE_NAME.get(vision_type, vision_type)} "
+            f"mode={MODE_NAME.get(mode, mode)} valid={valid}"
+        )
+
     return f"FRAME cmd=0x{cmd:02X} seq={frame['seq']} payload={payload.hex(' ')}"
 
 
@@ -206,12 +244,18 @@ def main():
 
     subparsers.add_parser("ping")
     subparsers.add_parser("status")
+    subparsers.add_parser("vision-status")
+    k210_text_parser = subparsers.add_parser("k210-text")
+    k210_text_parser.add_argument("text", help="ASCII/UTF-8 text forwarded to K210 UART2")
 
     enable_parser = subparsers.add_parser("enable")
     enable_parser.add_argument("value", type=int, choices=[0, 1])
 
     mode_parser = subparsers.add_parser("mode")
     mode_parser.add_argument("value", type=int, choices=range(0, 7))
+
+    host_state_parser = subparsers.add_parser("set-host-state")
+    host_state_parser.add_argument("value", type=int, choices=range(0, 256))
 
     move_parser = subparsers.add_parser("move")
     move_parser.add_argument("move_x", type=float)
@@ -235,6 +279,15 @@ def main():
         if args.command == "status":
             sys.exit(send_and_print(ser, build_frame(CMD_QUERY_STATUS, seq), args.timeout))
 
+        if args.command == "vision-status":
+            sys.exit(send_and_print(ser, build_frame(CMD_QUERY_VISION, seq), args.timeout))
+
+        if args.command == "k210-text":
+            payload = args.text.encode("utf-8")
+            if len(payload) > 32:
+                raise SystemExit("k210-text payload must be 32 bytes or fewer")
+            sys.exit(send_and_print(ser, build_frame(CMD_K210_TEXT, seq, payload), args.timeout))
+
         if args.command == "enable":
             payload = bytes([args.value])
             sys.exit(send_and_print(ser, build_frame(CMD_SET_ENABLE, seq, payload), args.timeout))
@@ -242,6 +295,10 @@ def main():
         if args.command == "mode":
             payload = bytes([args.value])
             sys.exit(send_and_print(ser, build_frame(CMD_SET_MODE, seq, payload), args.timeout))
+
+        if args.command == "set-host-state":
+            payload = bytes([args.value])
+            sys.exit(send_and_print(ser, build_frame(CMD_SET_HOST_STATE, seq, payload), args.timeout))
 
         if args.command == "move":
             payload = struct.pack("<hh", int(args.move_x * 10), int(args.move_z * 10))

@@ -30,8 +30,9 @@ void bsp_init(void)
 	DMP_Init();                     //DMP初始化    DMP initialization
 	
 	OLED_I2C_Init();							 //oled初始化  OLED initialization
-	 
+	
 	Battery_init();									//电池电量检测初始化 Initialization of battery level detection
+	TIM6_Init();									//LED闪烁、电压检测、树莓派状态服务函数
 }
 
 //根据模式选择进行模块的初始化  Initialize modules based on mode selection
@@ -45,9 +46,6 @@ void bsp_mode_init(void)
 	{
 		USART2_init(115200);						//k210接口  K210 interface
 	}
-
-	TIM6_Init();									//LED闪烁、电压检测服务函数  LED flashing, voltage detection service function
-
 }
 
 

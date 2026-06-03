@@ -1,0 +1,29 @@
+services:
+  ros2-dev:
+    image: ros:humble-ros-base
+    container_name: balance-car-ros2-dev
+    network_mode: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    working_dir: /workspaces/balance_car/ws
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      COORDINATOR_HOST: 127.0.0.1
+      COORDINATOR_PORT: 8765
+      BALANCE_CAR_SDK_ROOT: /workspaces/balance_car/vendor/YDLidar-SDK
+      YDLIDAR_SDK_ROOT: /workspaces/balance_car/vendor/YDLidar-SDK
+      PYTHONPATH: /workspaces/balance_car/vendor/YDLidar-SDK
+      HOME: /tmp/balance_car_ros
+      ROS_LOG_DIR: /tmp/balance_car_ros/log
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - /home/lifng0/workspace/balance_car/ws:/workspaces/balance_car/ws
+      - /home/lifng0/workspace/balance_car/docker/ros2:/workspaces/balance_car/docker/ros2:ro
+      - /home/lifng0/workspace/balance_car/scripts:/workspaces/balance_car/scripts:ro
+      - /home/lifng0/workspace/balance_car/vendor:/workspaces/balance_car/vendor
+      - /home/lifng0/workspace/balance_car/logs/ros2:/tmp/balance_car_ros
+      - /dev:/dev
+    command: bash -lc "sleep infinity"

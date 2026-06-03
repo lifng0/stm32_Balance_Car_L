@@ -1,0 +1,9 @@
+bridge:
+  ros__parameters:
+    backend_host: 127.0.0.1
+    backend_port: 8765
+lidar:
+  ros__parameters:
+    device: ""
+    baudrate: 230400
+    scan_frequency: 10.0

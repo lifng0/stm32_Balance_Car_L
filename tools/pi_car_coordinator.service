@@ -1,0 +1,17 @@
+[Unit]
+Description=Balance Car Raspberry Pi Coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lifng0
+WorkingDirectory=/home/lifng0/workspace/balance_car/scripts
+ExecStart=/usr/bin/python3 /home/lifng0/workspace/balance_car/scripts/pi_car_coordinator.py --stm32-device /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --lidar-device /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0 --lidar-policy-config /home/lifng0/workspace/balance_car/scripts/lidar_mode_policy.json --lidar-motor-dtr-control --lidar-motor-dtr-active-high --lidar-motor-settle-time 0.2
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

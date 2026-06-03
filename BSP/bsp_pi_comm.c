@@ -3,7 +3,7 @@
 #define PI_COMM_SOF1                 0xAA
 #define PI_COMM_SOF2                 0x55
 #define PI_COMM_VERSION              0x01
-#define PI_COMM_MAX_PAYLOAD          16
+#define PI_COMM_MAX_PAYLOAD          32
 #define PI_COMM_HEARTBEAT_TIMEOUT    50
 
 #define PI_COMM_CMD_PING             0x01
@@ -13,12 +13,20 @@
 #define PI_COMM_CMD_QUERY_STATUS     0x05
 #define PI_COMM_CMD_HEARTBEAT        0x06
 #define PI_COMM_CMD_EMERGENCY_STOP   0x07
+#define PI_COMM_CMD_SET_HOST_STATE   0x08
+#define PI_COMM_CMD_QUERY_VISION     0x09
+#define PI_COMM_CMD_K210_TEXT        0x0A
 
 #define PI_COMM_CMD_ACK              0x81
 #define PI_COMM_CMD_NACK             0x82
 #define PI_COMM_CMD_STATUS           0x83
 #define PI_COMM_CMD_EVENT            0x84
 #define PI_COMM_CMD_HEARTBEAT_ACK    0x85
+#define PI_COMM_CMD_VISION_STATUS    0x86
+
+#define PI_VISION_NONE               0x00
+#define PI_VISION_TEXT               0x01
+#define PI_VISION_AI                 0x02
 
 #define PI_COMM_ERR_CHECKSUM         0x01
 #define PI_COMM_ERR_LENGTH           0x02
@@ -29,6 +37,16 @@
 #define PI_COMM_EVENT_LOW_POWER      0x01
 #define PI_COMM_EVENT_POWER_RECOVER  0x02
 #define PI_COMM_EVENT_TIMEOUT_STOP   0x04
+#define PI_COMM_EVENT_START_REQUEST  0x10
+#define PI_COMM_EVENT_MODE_SELECT    0x11
+#define PI_COMM_EVENT_STOP_ASSERT    0x12
+#define PI_COMM_EVENT_STOP_CLEAR     0x13
+#define PI_COMM_EVENT_SHUTDOWN_REQ   0x14
+
+#define PI_HOST_STATE_PI_READY       0x01
+#define PI_HOST_STATE_LIDAR_READY    0x02
+#define PI_HOST_STATE_SYSTEM_READY   0x04
+#define PI_HOST_STATE_SHUTDOWN_ACK   0x08
 
 typedef enum
 {
@@ -53,6 +71,9 @@ static volatile uint16_t pi_timeout_ticks = 0;
 static volatile uint8_t pi_supervision_active = 0;
 static volatile uint8_t pi_timeout_latched = 0;
 static uint8_t pi_last_power_flag = 0;
+static uint8_t pi_last_stop_flag = 1;
+static volatile uint8_t pi_host_state_flags = 0;
+static uint8_t pi_k210_uart_ready = 0;
 
 static void PI_Comm_ResetParser(void)
 {
@@ -181,11 +202,66 @@ static void PI_Comm_SendStatus(uint8_t seq)
 	PI_Comm_SendFrame(PI_COMM_CMD_STATUS, seq, payload, 11);
 }
 
+static void PI_Comm_SendVisionStatus(uint8_t seq)
+{
+	uint8_t payload[PI_COMM_MAX_PAYLOAD];
+	uint8_t payload_len = 0;
+	char text_buffer[21] = {'\0'};
+	uint8_t text_len = 0;
+	K210_Data_t ai_snapshot;
+
+	memset(payload, 0, sizeof(payload));
+	payload[1] = (uint8_t)mode;
+
+	if ((mode == K210_QR) || (mode == K210_SelfLearn) || (mode == K210_mnist))
+	{
+		text_len = K210_GetLastText(text_buffer, sizeof(text_buffer));
+		payload[0] = PI_VISION_TEXT;
+		payload[2] = (uint8_t)(text_len > 0 ? 1 : 0);
+		payload[3] = text_len;
+		payload_len = 4;
+		if (text_len > 0)
+		{
+			memcpy(&payload[4], text_buffer, text_len);
+			payload_len = (uint8_t)(4 + text_len);
+		}
+	}
+	else if ((mode == K210_Line) || (mode == K210_Follow))
+	{
+		payload[0] = PI_VISION_AI;
+		payload[2] = K210_HasAISnapshot();
+		K210_GetAISnapshot(&ai_snapshot);
+		PI_Comm_PutInt16(payload, 3, (int16_t)ai_snapshot.k210_X);
+		PI_Comm_PutInt16(payload, 5, (int16_t)ai_snapshot.k210_Y);
+		PI_Comm_PutInt16(payload, 7, (int16_t)ai_snapshot.k210_W);
+		PI_Comm_PutInt16(payload, 9, (int16_t)ai_snapshot.k210_H);
+		PI_Comm_PutInt16(payload, 11, (int16_t)ai_snapshot.k210_area);
+		payload_len = 13;
+	}
+	else
+	{
+		payload[0] = PI_VISION_NONE;
+		payload[2] = 0;
+		payload_len = 3;
+	}
+
+	PI_Comm_SendFrame(PI_COMM_CMD_VISION_STATUS, seq, payload, payload_len);
+}
+
 static void PI_Comm_SendEvent(uint8_t event_code)
 {
 	uint8_t payload[1];
 	payload[0] = event_code;
 	PI_Comm_SendFrame(PI_COMM_CMD_EVENT, 0, payload, 1);
+}
+
+static void PI_Comm_EnsureK210UartReady(void)
+{
+	if (pi_k210_uart_ready == 0)
+	{
+		USART2_init(115200);
+		pi_k210_uart_ready = 1;
+	}
 }
 
 static void PI_Comm_InitModePeripheral(Car_Mode target_mode)
@@ -197,7 +273,7 @@ static void PI_Comm_InitModePeripheral(Car_Mode target_mode)
 	else if ((target_mode == K210_QR) || (target_mode == K210_Line) || (target_mode == K210_Follow) ||
 	         (target_mode == K210_SelfLearn) || (target_mode == K210_mnist))
 	{
-		USART2_init(115200);
+		PI_Comm_EnsureK210UartReady();
 	}
 }
 
@@ -300,6 +376,26 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 		PI_Comm_SendFrame(PI_COMM_CMD_HEARTBEAT_ACK, seq, 0, 0);
 		break;
 
+	case PI_COMM_CMD_QUERY_VISION:
+		if (len != 0)
+		{
+			PI_Comm_SendNack(seq, cmd, PI_COMM_ERR_LENGTH);
+			return;
+		}
+		PI_Comm_SendVisionStatus(seq);
+		break;
+
+	case PI_COMM_CMD_K210_TEXT:
+		if (len == 0 || len > PI_COMM_MAX_PAYLOAD)
+		{
+			PI_Comm_SendNack(seq, cmd, PI_COMM_ERR_LENGTH);
+			return;
+		}
+		PI_Comm_EnsureK210UartReady();
+		USART2_Send_ArrayU8((uint8_t *)payload, len);
+		PI_Comm_SendAck(seq, cmd);
+		break;
+
 	case PI_COMM_CMD_EMERGENCY_STOP:
 		if (len != 0)
 		{
@@ -310,6 +406,16 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 		Move_Z = 0;
 		Stop_Flag = 1;
 		PI_Comm_RefreshWatchdog();
+		PI_Comm_SendAck(seq, cmd);
+		break;
+
+	case PI_COMM_CMD_SET_HOST_STATE:
+		if (len != 1)
+		{
+			PI_Comm_SendNack(seq, cmd, PI_COMM_ERR_LENGTH);
+			return;
+		}
+		pi_host_state_flags = payload[0];
 		PI_Comm_SendAck(seq, cmd);
 		break;
 
@@ -390,6 +496,34 @@ void PI_Comm_10ms_Task(void)
 			PI_Comm_SendEvent(PI_COMM_EVENT_POWER_RECOVER);
 		}
 	}
+
+	if (pi_last_stop_flag != Stop_Flag)
+	{
+		pi_last_stop_flag = Stop_Flag;
+		if (Stop_Flag)
+		{
+			PI_Comm_SendEvent(PI_COMM_EVENT_STOP_ASSERT);
+		}
+		else
+		{
+			PI_Comm_SendEvent(PI_COMM_EVENT_STOP_CLEAR);
+		}
+	}
+}
+
+uint8_t PI_Comm_GetHostStateFlags(void)
+{
+	return pi_host_state_flags;
+}
+
+uint8_t PI_Comm_IsSystemReady(void)
+{
+	return (uint8_t)((pi_host_state_flags & PI_HOST_STATE_SYSTEM_READY) ? 1 : 0);
+}
+
+void PI_Comm_SendEventCode(uint8_t event_code)
+{
+	PI_Comm_SendEvent(event_code);
 }
 
 void USART3_IRQHandler(void)

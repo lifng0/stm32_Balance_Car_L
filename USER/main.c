@@ -30,31 +30,113 @@ char showbuf[20]={'\0'};
 extern u8 newLineReceived;//蓝牙接收 //Bluetooth reception
 extern u8 bulettohflag;
 
+typedef enum
+{
+	SYS_WAIT_PI_READY = 0,
+	SYS_MODE_SELECT,
+	SYS_WAIT_START,
+	SYS_RUNNING,
+	SYS_SHUTDOWN_WAIT
+} System_Run_State;
+
+static void Show_Pi_Init_State(void)
+{
+	uint8_t host_state = PI_Comm_GetHostStateFlags();
+	OLED_Draw_Line("Pi system init...", 1, true, false);
+	OLED_Draw_Line((host_state & 0x01) ? "PI: READY         " : "PI: WAIT          ", 2, false, false);
+	OLED_Draw_Line((host_state & 0x02) ? "LIDAR: READY      " : "LIDAR: WAIT       ", 3, false, false);
+	OLED_Draw_Line((host_state & 0x04) ? "SYSTEM: READY     " : "SYSTEM: BOOTING   ", 4, false, true);
+}
+
+static void Show_Wait_Start_State(void)
+{
+	OLED_Draw_Line("press key to start", 2, false, false);
+	OLED_Draw_Line("hold key to shutdn", 3, false, true);
+}
+
+static void Show_Shutdown_State(void)
+{
+	OLED_Draw_Line("shutdown request  ", 2, false, false);
+	OLED_Draw_Line("wait pi poweroff  ", 3, false, false);
+	OLED_Draw_Line("safe poweroff soon", 4, false, true);
+}
+
 int main(void)
 {	
-		
-	bsp_init();//基本外设初始化 //Basic peripheral initialization
-	
-	Mode_select(); //按下按键结束模式选择 //Press the button to end mode selection
-	
-	bsp_mode_init();//根据模式初始化扩展外设 //Initialize and expand peripherals based on the pattern
-	
-	
-	MPU6050_EXTI_Init();		//此中断服务函数放到最后  //This interrupt service function is placed last
-	
-	
-	OLED_Draw_Line("put down key start!", 2, false, true); 
-	
-	while(!Key1_State(1) && Stop_Flag ==1 );
-	Stop_Flag = 0; //开始控制  //Start controlling
+	System_Run_State system_state = SYS_WAIT_PI_READY;
 
-	
-	OLED_Draw_Line("start control!        ", 2, false, true); 
-	
+	bsp_init();//基本外设初始化 //Basic peripheral initialization
+	MPU6050_EXTI_Init();		//此中断服务函数放到最后  //This interrupt service function is placed last
 
 
 	while(1)
 	{
+		if (Key1_Long_Press(2))
+		{
+			Stop_Flag = 1;
+			Move_X = 0;
+			Move_Z = 0;
+			PI_Comm_SendEventCode(0x14);
+			system_state = SYS_SHUTDOWN_WAIT;
+			Show_Shutdown_State();
+		}
+
+		if(system_state == SYS_WAIT_PI_READY)
+		{
+			Show_Pi_Init_State();
+			if(PI_Comm_IsSystemReady())
+			{
+				system_state = SYS_MODE_SELECT;
+			}
+			continue;
+		}
+
+		if(system_state == SYS_MODE_SELECT)
+		{
+			Stop_Flag = 1;
+			Move_X = 0;
+			Move_Z = 0;
+			PI_Comm_SendEventCode(0x11);
+			Mode_select();
+			bsp_mode_init();
+			Show_Wait_Start_State();
+			system_state = SYS_WAIT_START;
+			continue;
+		}
+
+		if(system_state == SYS_WAIT_START)
+		{
+			Show_Wait_Start_State();
+			if(Key1_State(1))
+			{
+				Stop_Flag = 0;
+				PI_Comm_SendEventCode(0x10);
+				OLED_Draw_Line("running...         ", 2, false, true);
+				system_state = SYS_RUNNING;
+			}
+			continue;
+		}
+
+		if(system_state == SYS_SHUTDOWN_WAIT)
+		{
+			Show_Shutdown_State();
+			if(PI_Comm_GetHostStateFlags() & 0x08)
+			{
+				OLED_Draw_Line("pi shutdown ok     ", 2, false, false);
+				OLED_Draw_Line("now cut main power ", 3, false, true);
+			}
+			continue;
+		}
+
+		if(Key1_State(1))
+		{
+			Stop_Flag = 1;
+			Move_X = 0;
+			Move_Z = 0;
+			system_state = SYS_MODE_SELECT;
+			continue;
+		}
+
 		if(mode == Normal || mode == Weight_M)//正常模式、负重模式  //Normal mode, load mode
 		{
 			if (newLineReceived) //蓝牙遥控服务  //Bluetooth remote control service
@@ -70,6 +152,10 @@ int main(void)
 
 			sprintf(showbuf,"bat =%2.2f V   ",battery);
 			OLED_Draw_Line(showbuf, 3, false, true); 
+			if(Stop_Flag)
+			{
+				OLED_Draw_Line("paused             ", 2, false, true);
+			}
 		}
 
 		else if(mode == K210_QR) //识别二维码模式  //Identify QR code patterns

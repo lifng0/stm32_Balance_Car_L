@@ -13,5 +13,8 @@ void Change_state_self(void);
 void Deal_K210_minst(uint8_t recv_msg);
 void Change_state_minst(void);
 
+uint8_t K210_GetLastText(char *buffer, uint8_t buffer_len);
+uint8_t K210_HasLastText(void);
+
 #endif
 
