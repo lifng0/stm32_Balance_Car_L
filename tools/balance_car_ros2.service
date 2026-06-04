@@ -1,0 +1,24 @@
+[Unit]
+Description=Balance Car ROS2 Docker Bringup
+After=network-online.target docker.service balance-car-coordinator.service
+Wants=network-online.target
+Requires=docker.service balance-car-coordinator.service
+
+[Service]
+Type=simple
+User=lifng0
+WorkingDirectory=/home/lifng0/workspace/balance_car/docker/ros2
+Environment=WORKSPACE_ROOT=/home/lifng0/workspace/balance_car
+Environment=BACKEND_HOST=127.0.0.1
+Environment=BACKEND_PORT=8765
+Environment=WAIT_TIMEOUT_SEC=30
+Environment=ENABLE_NAVIGATION=false
+Environment=NAVIGATION_TASK=avoid
+ExecStart=/usr/bin/bash /home/lifng0/workspace/balance_car/scripts/start_ros2_bringup.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

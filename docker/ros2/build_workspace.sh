@@ -14,4 +14,5 @@ colcon build --symlink-install \
   balance_car_lidar \
   balance_car_behavior \
   balance_car_perception \
+  balance_car_navigation \
   balance_car_bringup

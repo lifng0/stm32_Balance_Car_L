@@ -92,7 +92,7 @@ void EXTI15_10_IRQHandler(void)
 		{
 			if(Pick_Up(Acceleration_Z,Angle_Balance,Encoder_Left,Encoder_Right))//检查是否小车被拿起 Check if the car has been picked up
 				Stop_Flag=1;	                           					//如果被拿起就关闭电机 If picked up, turn off the motor
-			if(Put_Down(Angle_Balance,Encoder_Left,Encoder_Right))//检查是否小车被放下 Check if the car has been lowered
+			if(Balance_Run_Enabled && Put_Down(Angle_Balance,Encoder_Left,Encoder_Right))//仅在运行态允许放车后重新起平衡 Only allow re-arming from put-down while running
 				Stop_Flag=0;	                           					//如果被放下就启动电机 If it is put down, start the motor
 		}
 		
@@ -214,6 +214,11 @@ Output  : 1：put down  0：No action
 int Put_Down(float Angle,int encoder_left,int encoder_right)
 { 		   
 	 static u16 flag;//,count;	 
+	 if(Balance_Run_Enabled==0)
+	 {
+		 flag = 0;
+		 return 0;
+	 }
 	 if(Stop_Flag==0)                     //防止误检    Prevent false positives   
 			return 0;	                 
 	 if(flag==0)                                               

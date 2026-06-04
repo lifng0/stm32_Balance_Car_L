@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from collections import deque
 import json
 import socketserver
 import struct
@@ -19,6 +20,8 @@ from pi_serial_bridge import (
     CMD_QUERY_VISION,
     CMD_QUERY_STATUS,
     CMD_SET_HOST_STATE,
+    CMD_SET_MODE,
+    CMD_SET_MOVE,
     CMD_STATUS,
     CMD_VISION_STATUS,
     ERROR_NAME,
@@ -37,6 +40,7 @@ HOST_STATE_SHUTDOWN_ACK = 0x08
 
 BACKEND_DEFAULT_HOST = "127.0.0.1"
 BACKEND_DEFAULT_PORT = 8765
+ROS_READY_LEASE_SEC = 3.0
 
 EVENT_START_REQUEST = 0x10
 EVENT_MODE_SELECT = 0x11
@@ -417,7 +421,9 @@ class STM32Coordinator:
         self.lidar_motor_dtr_active_high = lidar_motor_dtr_active_high
         self.lidar_motor_settle_time = lidar_motor_settle_time
         self.serial = open_port(device, baudrate)
+        self.serial.timeout = min(float(self.serial.timeout or 0.1), 0.02)
         self.parser = FrameParser()
+        self.pending_frames = deque()
         self.seq = 1
         self.host_state = 0
         self.current_status: dict | None = None
@@ -435,10 +441,21 @@ class STM32Coordinator:
         self.vision_state: dict | None = None
         self.lidar_enabled = bool(self.lidar_policy.get("default_enabled", False))
         self.lidar_required = False
+        self.ros_ready = False
+        self.ros_ready_reason = "waiting_for_ros"
+        self.last_ros_ready_at = 0.0
+        self.last_ros_nodes: list[str] = []
+        self.last_ros_required_nodes: list[str] = []
         self.host_state_supported = True
         self.lidar_worker: HostLidarWorker | None = None
         self.last_lidar_demand_at = 0.0
-        self.state_lock = threading.Lock()
+        self.last_control_state: dict | None = None
+        self.control_counter = 0
+        self.last_host_state_sync_at = 0.0
+        self.last_host_state_sent: int | None = None
+        self.host_state_confirmed = False
+        self.state_lock = threading.RLock()
+        self.serial_lock = threading.RLock()
         self.backend_server: CoordinatorBackendServer | None = None
         self.backend_thread: threading.Thread | None = None
 
@@ -473,13 +490,20 @@ class STM32Coordinator:
         self.seq = (self.seq + 1) & 0xFF
         return value
 
-    def write_frame(self, cmd: int, payload: bytes = b"") -> int:
+    def _write_frame_unlocked(self, cmd: int, payload: bytes = b"") -> int:
         seq = self.next_seq()
         self.serial.write(build_frame(cmd, seq, payload))
         self.serial.flush()
         return seq
 
-    def read_once(self, timeout: float):
+    def write_frame(self, cmd: int, payload: bytes = b"") -> int:
+        with self.serial_lock:
+            return self._write_frame_unlocked(cmd, payload)
+
+    def _read_once_unlocked(self, timeout: float):
+        if self.pending_frames:
+            return self.pending_frames.popleft()
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             data = self.serial.read(64)
@@ -488,69 +512,218 @@ class STM32Coordinator:
             for value in data:
                 frame = self.parser.feed(value)
                 if frame:
-                    return frame
+                    self.pending_frames.append(frame)
+            if self.pending_frames:
+                return self.pending_frames.popleft()
         return None
 
+    def read_once(self, timeout: float):
+        with self.serial_lock:
+            return self._read_once_unlocked(timeout)
+
     def wait_for_cmd(self, expected_cmd: int, expected_seq: int, timeout: float):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            frame = self.read_once(deadline - time.time())
-            if not frame:
-                continue
-            self.handle_frame(frame)
-            if (
-                frame["ok"]
-                and frame["cmd"] == expected_cmd
-                and frame["seq"] == expected_seq
-            ):
-                return frame
+        with self.serial_lock:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                frame = self._read_once_unlocked(deadline - time.time())
+                if not frame:
+                    continue
+                self.handle_frame(frame)
+                if (
+                    frame["ok"]
+                    and frame["cmd"] == expected_cmd
+                    and frame["seq"] == expected_seq
+                ):
+                    return frame
         return None
 
     def send_host_state(self, flags: int, timeout: float = 1.0) -> bool:
         with self.state_lock:
             self.host_state = flags & 0xFF
         if not self.host_state_supported:
+            self.host_state_confirmed = True
+            self.last_host_state_sent = self.host_state
             return True
-        seq = self.write_frame(CMD_SET_HOST_STATE, bytes([self.host_state]))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            frame = self.read_once(deadline - time.time())
-            if not frame:
-                continue
-            self.handle_frame(frame)
-            if not frame["ok"]:
-                continue
-            payload = frame["payload"]
-            if frame["cmd"] == CMD_ACK and len(payload) >= 2:
-                if payload[0] == CMD_SET_HOST_STATE and payload[1] == seq:
-                    return True
-            if frame["cmd"] == CMD_NACK and len(payload) >= 3:
-                if payload[0] == CMD_SET_HOST_STATE and payload[1] == seq:
-                    error_code = payload[2]
-                    if error_code == 3:
-                        self.host_state_supported = False
-                        log("stm32 firmware does not support SET_HOST_STATE, fallback to backend-only readiness flags")
+        with self.serial_lock:
+            seq = self._write_frame_unlocked(CMD_SET_HOST_STATE, bytes([self.host_state]))
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                frame = self._read_once_unlocked(deadline - time.time())
+                if not frame:
+                    continue
+                self.handle_frame(frame)
+                if not frame["ok"]:
+                    continue
+                payload = frame["payload"]
+                if frame["cmd"] == CMD_ACK and len(payload) >= 2:
+                    if payload[0] == CMD_SET_HOST_STATE and payload[1] == seq:
+                        self.host_state_confirmed = True
+                        self.last_host_state_sent = self.host_state
+                        self.last_host_state_sync_at = time.time()
                         return True
-                    error_name = ERROR_NAME.get(error_code, str(error_code))
-                    log(f"stm32 rejected host state flags=0x{self.host_state:02X} err={error_name}")
-                    return False
+                if frame["cmd"] == CMD_NACK and len(payload) >= 3:
+                    if payload[0] == CMD_SET_HOST_STATE and payload[1] == seq:
+                        error_code = payload[2]
+                        if error_code == 3:
+                            self.host_state_supported = False
+                            self.host_state_confirmed = True
+                            self.last_host_state_sent = self.host_state
+                            self.last_host_state_sync_at = time.time()
+                            log("stm32 firmware does not support SET_HOST_STATE, fallback to backend-only readiness flags")
+                            return True
+                        error_name = ERROR_NAME.get(error_code, str(error_code))
+                        log(f"stm32 rejected host state flags=0x{self.host_state:02X} err={error_name}")
+                        self.host_state_confirmed = False
+                        self.last_host_state_sync_at = time.time()
+                        return False
+        self.host_state_confirmed = False
+        self.last_host_state_sync_at = time.time()
         return False
 
+    def sync_host_state_if_needed(self, force: bool = False, min_interval: float = 1.0) -> bool:
+        if not self.host_state_supported:
+            self.host_state_confirmed = True
+            self.last_host_state_sent = self.host_state
+            return True
+
+        now = time.time()
+        host_state_changed = self.last_host_state_sent != self.host_state
+        sync_due = (now - self.last_host_state_sync_at) >= min_interval
+        if not force:
+            if self.host_state_confirmed and not host_state_changed:
+                return True
+            if not host_state_changed and not sync_due and not self.host_state_confirmed:
+                return False
+
+        return self.send_host_state(self.host_state, timeout=0.3 if not force else 1.0)
+
     def query_status(self, timeout: float = 1.0) -> dict | None:
-        seq = self.write_frame(CMD_QUERY_STATUS)
-        frame = self.wait_for_cmd(CMD_STATUS, seq, timeout)
-        if frame and frame["ok"]:
-            with self.state_lock:
-                self.current_status = parse_status_payload(frame["payload"])
+        with self.serial_lock:
+            seq = self._write_frame_unlocked(CMD_QUERY_STATUS)
+            frame = self.wait_for_cmd(CMD_STATUS, seq, timeout)
+            if frame and frame["ok"]:
+                with self.state_lock:
+                    self.current_status = parse_status_payload(frame["payload"])
         return self.current_status
 
     def query_vision(self, timeout: float = 1.0) -> dict | None:
-        seq = self.write_frame(CMD_QUERY_VISION)
-        frame = self.wait_for_cmd(CMD_VISION_STATUS, seq, timeout)
-        if frame and frame["ok"]:
-            with self.state_lock:
-                self.vision_state = parse_vision_payload(frame["payload"])
+        with self.serial_lock:
+            seq = self._write_frame_unlocked(CMD_QUERY_VISION)
+            frame = self.wait_for_cmd(CMD_VISION_STATUS, seq, timeout)
+            if frame and frame["ok"]:
+                with self.state_lock:
+                    self.vision_state = parse_vision_payload(frame["payload"])
         return self.vision_state
+
+    def _request_ack(self, command: int, payload: bytes = b"", timeout: float = 1.0) -> dict:
+        with self.serial_lock:
+            seq = self._write_frame_unlocked(command, payload)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                frame = self._read_once_unlocked(deadline - time.time())
+                if not frame:
+                    continue
+                self.handle_frame(frame)
+                if not frame["ok"]:
+                    continue
+                response_payload = frame["payload"]
+                if frame["cmd"] == CMD_ACK and len(response_payload) >= 2:
+                    if response_payload[0] == command and response_payload[1] == seq:
+                        return {"ok": True, "seq": seq, "cmd": command}
+                if frame["cmd"] == CMD_NACK and len(response_payload) >= 3:
+                    if response_payload[0] == command and response_payload[1] == seq:
+                        error_code = response_payload[2]
+                        return {
+                            "ok": False,
+                            "seq": seq,
+                            "cmd": command,
+                            "error": "nack",
+                            "error_code": error_code,
+                            "error_name": ERROR_NAME.get(error_code, str(error_code)),
+                        }
+        return {"ok": False, "cmd": command, "error": "timeout"}
+
+    def set_mode_command(self, mode_id: int) -> dict:
+        response = self._request_ack(CMD_SET_MODE, bytes([mode_id & 0xFF]))
+        response["value"] = mode_id
+        if response.get("ok"):
+            response["car_state"] = self.query_status(timeout=0.3)
+            response["vision_state"] = self.query_vision(timeout=0.3)
+            self.refresh_lidar_state()
+        response["timestamp"] = time.time()
+        return response
+
+    def set_move_command(self, move_x: float, move_z: float) -> dict:
+        clamped_x = max(-30.0, min(30.0, float(move_x)))
+        clamped_z = max(-30.0, min(30.0, float(move_z)))
+        payload = struct.pack("<hh", int(round(clamped_x * 10.0)), int(round(clamped_z * 10.0)))
+        response = self._request_ack(CMD_SET_MOVE, payload)
+        response["move_x"] = clamped_x
+        response["move_z"] = clamped_z
+        if response.get("ok"):
+            response["car_state"] = self.query_status(timeout=0.3)
+        response["timestamp"] = time.time()
+        return response
+
+    def remember_control_state(self, response: dict) -> dict:
+        control_state = {
+            "control_counter": self.control_counter + 1,
+            "ok": bool(response.get("ok")),
+            "cmd": response.get("cmd"),
+            "value": response.get("value"),
+            "move_x": response.get("move_x"),
+            "move_z": response.get("move_z"),
+            "error": response.get("error"),
+            "error_name": response.get("error_name"),
+            "timestamp": response.get("timestamp", time.time()),
+            "car_state": response.get("car_state"),
+        }
+        with self.state_lock:
+            self.control_counter = control_state["control_counter"]
+            self.last_control_state = control_state
+        return response
+
+    def motion_control_permitted(self) -> tuple[bool, str]:
+        car_state = self.current_status or {}
+        if self.shutdown_started:
+            return False, "shutdown_started"
+        if self.system_mode != "running":
+            return False, f"system_mode_{self.system_mode}"
+        if not self.ros_ready:
+            return False, f"ros_not_ready_{self.ros_ready_reason}"
+        if bool(car_state.get("stop_flag", True)):
+            return False, "stop_flag_asserted"
+        return True, ""
+
+    def update_ros_ready(self, ready: bool, reason: str = "", nodes: list[str] | None = None, required_nodes: list[str] | None = None) -> dict:
+        with self.state_lock:
+            self.ros_ready = bool(ready)
+            self.ros_ready_reason = reason or ("ready" if ready else "not_ready")
+            self.last_ros_ready_at = time.time()
+            self.last_ros_nodes = list(nodes or [])
+            self.last_ros_required_nodes = list(required_nodes or [])
+        self.refresh_lidar_state()
+        return {
+            "ok": True,
+            "ros_ready": self.ros_ready,
+            "ros_ready_reason": self.ros_ready_reason,
+            "last_ros_ready_at": self.last_ros_ready_at,
+            "timestamp": time.time(),
+        }
+
+    def refresh_ros_ready(self) -> None:
+        with self.state_lock:
+            if self.last_ros_ready_at <= 0.0:
+                self.ros_ready = False
+                self.ros_ready_reason = "waiting_for_ros"
+                return
+            if time.time() - self.last_ros_ready_at > ROS_READY_LEASE_SEC:
+                self.ros_ready = False
+                self.ros_ready_reason = "ros_heartbeat_timeout"
+
+    def compute_system_ready(self, lidar_ready: bool) -> bool:
+        self.refresh_ros_ready()
+        return self.ros_ready and (not self.lidar_required or lidar_ready)
 
     def current_mode_id(self) -> int | None:
         if self.current_status is None:
@@ -596,15 +769,15 @@ class STM32Coordinator:
             with self.state_lock:
                 self.lidar_enabled = lidar_enabled
                 self.lidar_summary = lidar_summary
-                pi_ready = True
                 lidar_bit = HOST_STATE_LIDAR_READY if lidar_ready else 0
-                system_ready = pi_ready and (not self.lidar_required or lidar_ready)
+                system_ready = self.compute_system_ready(lidar_ready)
                 self.host_state = HOST_STATE_PI_READY | lidar_bit | (HOST_STATE_SYSTEM_READY if system_ready else 0)
 
     def heartbeat(self) -> None:
         seq = self.write_frame(CMD_HEARTBEAT)
-        self.wait_for_cmd(CMD_HEARTBEAT_ACK, seq, 0.3)
         self.last_heartbeat_at = time.time()
+        self.wait_for_cmd(CMD_HEARTBEAT_ACK, seq, 0.3)
+        self.sync_host_state_if_needed(min_interval=1.0)
 
     def handle_frame(self, frame) -> None:
         if not frame["ok"]:
@@ -681,6 +854,7 @@ class STM32Coordinator:
         if self.lidar_worker is not None:
             lidar_port, lidar_summary, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
             with self.state_lock:
+                self.refresh_ros_ready()
                 self.lidar_port = lidar_port or self.lidar_port
                 self.lidar_enabled = lidar_enabled
                 self.lidar_summary = lidar_summary
@@ -688,11 +862,12 @@ class STM32Coordinator:
                     self.host_state |= HOST_STATE_LIDAR_READY
                 else:
                     self.host_state &= ~HOST_STATE_LIDAR_READY
-                if not self.lidar_required or lidar_ready:
+                if self.compute_system_ready(lidar_ready):
                     self.host_state |= HOST_STATE_SYSTEM_READY
                 else:
                     self.host_state &= ~HOST_STATE_SYSTEM_READY
         with self.state_lock:
+            car_state = self.current_status or {}
             return {
                 "ok": True,
                 "backend_host": self.backend_host,
@@ -705,6 +880,7 @@ class STM32Coordinator:
                 "shutdown_ack": bool(self.host_state & HOST_STATE_SHUTDOWN_ACK),
                 "paused_by_pickup": self.paused_by_pickup,
                 "shutdown_started": self.shutdown_started,
+                "stop_flag": bool(car_state.get("stop_flag", True)),
                 "last_event_code": self.last_event_code,
                 "last_event_name": self.last_event_name,
                 "event_counter": self.event_counter,
@@ -712,10 +888,18 @@ class STM32Coordinator:
                 "lidar_port": self.lidar_port,
                 "lidar_enabled": self.lidar_enabled,
                 "lidar_required": self.lidar_required,
+                "ros_ready": self.ros_ready,
+                "ros_ready_reason": self.ros_ready_reason,
+                "last_ros_ready_at": self.last_ros_ready_at,
+                "ros_nodes": self.last_ros_nodes,
+                "ros_required_nodes": self.last_ros_required_nodes,
                 "lidar_summary": self.lidar_summary,
                 "vision_state": self.vision_state,
                 "car_state": self.current_status,
+                "control_state": self.last_control_state,
+                "control_counter": self.control_counter,
                 "host_state_supported": self.host_state_supported,
+                "control_backend_ready": True,
                 "timestamp": time.time(),
             }
 
@@ -731,15 +915,65 @@ class STM32Coordinator:
         if command == "get_vision":
             return {"ok": True, "vision_state": self.vision_state, "timestamp": time.time()}
 
+        if command == "set_ros_ready":
+            ready = bool(request.get("ready", False))
+            reason = str(request.get("reason", ""))
+            nodes = request.get("nodes") if isinstance(request.get("nodes"), list) else []
+            required_nodes = request.get("required_nodes") if isinstance(request.get("required_nodes"), list) else []
+            return self.update_ros_ready(ready, reason=reason, nodes=nodes, required_nodes=required_nodes)
+
+        if command == "set_mode":
+            value = request.get("value")
+            if not isinstance(value, int):
+                return {"ok": False, "error": "bad_value", "cmd": command}
+            return self.remember_control_state(self.set_mode_command(value))
+
+        if command == "set_move":
+            try:
+                move_x = float(request.get("move_x", 0.0))
+                move_z = float(request.get("move_z", 0.0))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "bad_value", "cmd": command}
+            permitted, reason = self.motion_control_permitted()
+            if not permitted:
+                return {
+                    "ok": False,
+                    "error": "forbidden",
+                    "cmd": command,
+                    "message": f"motion command rejected: {reason}",
+                    "timestamp": time.time(),
+                }
+            return self.remember_control_state(self.set_move_command(move_x, move_z))
+
+        if command in ("set_enable", "stop"):
+            return {
+                "ok": False,
+                "error": "forbidden",
+                "cmd": command,
+                "message": "stop_flag is owned by stm32 only",
+                "timestamp": time.time(),
+            }
+
         return {"ok": False, "error": "unsupported_cmd", "cmd": command}
 
     def run(self, sdk_root: Path, lidar_device: str | None, lidar_baudrate: int, scan_frequency: float) -> int:
         log(f"stm32 device={self.device} baudrate={self.baudrate}")
         self.start_backend_server()
-        while not self.send_host_state(HOST_STATE_PI_READY):
+        startup_retries = 0
+        max_startup_retries = 3
+        while startup_retries < max_startup_retries and not self.send_host_state(HOST_STATE_PI_READY):
             log("stm32 not ready for PI_READY, retry in 1s")
+            startup_retries += 1
             time.sleep(1.0)
-        log("reported PI_READY")
+        if startup_retries >= max_startup_retries:
+            with self.state_lock:
+                self.host_state = HOST_STATE_PI_READY
+            self.host_state_confirmed = False
+            self.last_host_state_sent = None
+            self.last_host_state_sync_at = 0.0
+            log("continue without blocking on PI_READY; will keep syncing host state in background")
+        else:
+            log("reported PI_READY")
 
         self.lidar_worker = HostLidarWorker(
             sdk_root=sdk_root,
@@ -769,6 +1003,7 @@ class STM32Coordinator:
                 self.query_vision(timeout=0.2)
                 self.last_status_refresh_at = time.time()
                 self.refresh_lidar_state()
+                self.sync_host_state_if_needed(min_interval=1.0)
                 if self.lidar_worker is not None:
                     lidar_port, lidar_summary, lidar_enabled, _ = self.lidar_worker.snapshot()
                     with self.state_lock:

@@ -143,6 +143,34 @@ cd ~/workspace/balance_car/docker/ros2
 docker compose -f compose.yaml run --rm ros2-dev bash -lc "source /opt/ros/humble/setup.bash && /workspaces/balance_car/docker/ros2/run_bringup.sh"
 ```
 
+## 6.4 配置开机自启 bringup
+
+当前仓库已经补充：
+
+- [start_ros2_bringup.sh](F:\stm32_Balance_Car_L\tools\start_ros2_bringup.sh)
+- [balance_car_ros2.service](F:\stm32_Balance_Car_L\tools\balance_car_ros2.service)
+
+建议部署到树莓派：
+
+- `~/workspace/balance_car/scripts/start_ros2_bringup.sh`
+- `/etc/systemd/system/balance_car_ros2.service`
+
+推荐命令：
+
+```bash
+chmod +x ~/workspace/balance_car/scripts/start_ros2_bringup.sh
+sudo cp ~/workspace/balance_car/scripts/balance_car_ros2.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now balance_car_ros2.service
+```
+
+这套自启逻辑会：
+
+- 依赖 `docker.service`
+- 依赖 `balance-car-coordinator.service`
+- 先等待本地后端 `127.0.0.1:8765` 可访问
+- 再启动容器内 `system.launch.py`
+
 ## 7. 当前结论
 
 当前 `ROS 2` 容器路线已经从“规划方案”变成了“实测可运行方案”。

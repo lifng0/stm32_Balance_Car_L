@@ -306,12 +306,18 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 		}
 		if (payload[0] == 0)
 		{
+			Balance_Run_Enabled = 0;
 			Stop_Flag = 1;
 			Move_X = 0;
 			Move_Z = 0;
 		}
 		else
 		{
+			if (Balance_Run_Enabled == 0)
+			{
+				PI_Comm_SendNack(seq, cmd, PI_COMM_ERR_BUSY_STATE);
+				return;
+			}
 			Stop_Flag = 0;
 		}
 		PI_Comm_RefreshWatchdog();
@@ -330,6 +336,7 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 			return;
 		}
 		mode = (Car_Mode)payload[0];
+		Balance_Run_Enabled = 0;
 		Move_X = 0;
 		Move_Z = 0;
 		Stop_Flag = 1;
@@ -404,6 +411,7 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 		}
 		Move_X = 0;
 		Move_Z = 0;
+		Balance_Run_Enabled = 0;
 		Stop_Flag = 1;
 		PI_Comm_RefreshWatchdog();
 		PI_Comm_SendAck(seq, cmd);
@@ -519,6 +527,11 @@ uint8_t PI_Comm_GetHostStateFlags(void)
 uint8_t PI_Comm_IsSystemReady(void)
 {
 	return (uint8_t)((pi_host_state_flags & PI_HOST_STATE_SYSTEM_READY) ? 1 : 0);
+}
+
+uint8_t PI_Comm_HasHeartbeatTimeout(void)
+{
+	return pi_timeout_latched;
 }
 
 void PI_Comm_SendEventCode(uint8_t event_code)

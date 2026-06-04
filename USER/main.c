@@ -23,6 +23,7 @@ float Acceleration_Z;                           		//Z轴加速度计  //Z-axis a
 float Mid_Angle  = -10.3;                          						//机械中值  //Mechanical median
 float Move_X,Move_Z; //Move_X:前进速度  Move_Z：转向速度  //Move_X: Forward speed Move_Z: Steering speed
 u8 Stop_Flag = 1; //0:开始 1:停止  //0: Start 1: Stop
+u8 Balance_Run_Enabled = 0; //0:未进入运行态 1:允许运行平衡环  //0: not armed 1: balance loop may run
 
 
 char showbuf[20]={'\0'};
@@ -36,6 +37,7 @@ typedef enum
 	SYS_MODE_SELECT,
 	SYS_WAIT_START,
 	SYS_RUNNING,
+	SYS_FAULT_RECOVERY,
 	SYS_SHUTDOWN_WAIT
 } System_Run_State;
 
@@ -61,6 +63,46 @@ static void Show_Shutdown_State(void)
 	OLED_Draw_Line("safe poweroff soon", 4, false, true);
 }
 
+static void Restore_Normal_Mode_Safe(void)
+{
+	Balance_Run_Enabled = 0;
+	Stop_Flag = 1;
+	Move_X = 0;
+	Move_Z = 0;
+	mode = Normal;
+	Set_Mid_Angle();
+	Set_angle();
+	Set_control_speed();
+	Set_PID();
+	bsp_mode_init();
+}
+
+static void Show_Fault_Recovery_State(void)
+{
+	uint8_t host_state = PI_Comm_GetHostStateFlags();
+	uint8_t timeout_fault = PI_Comm_HasHeartbeatTimeout();
+
+	OLED_Draw_Line("link/component err", 1, true, false);
+	if (timeout_fault || !(host_state & 0x01))
+	{
+		OLED_Draw_Line("ERR: PI LINK LOST ", 2, false, false);
+	}
+	else if (!(host_state & 0x02))
+	{
+		OLED_Draw_Line("ERR: LIDAR LOST   ", 2, false, false);
+	}
+	else if (!(host_state & 0x04))
+	{
+		OLED_Draw_Line("ERR: SYSTEM LOST  ", 2, false, false);
+	}
+	else
+	{
+		OLED_Draw_Line("ERR: UNKNOWN      ", 2, false, false);
+	}
+	OLED_Draw_Line("fallback: normal  ", 3, false, false);
+	OLED_Draw_Line("wait recover...   ", 4, false, true);
+}
+
 int main(void)
 {	
 	System_Run_State system_state = SYS_WAIT_PI_READY;
@@ -73,6 +115,7 @@ int main(void)
 	{
 		if (Key1_Long_Press(2))
 		{
+			Balance_Run_Enabled = 0;
 			Stop_Flag = 1;
 			Move_X = 0;
 			Move_Z = 0;
@@ -93,6 +136,7 @@ int main(void)
 
 		if(system_state == SYS_MODE_SELECT)
 		{
+			Balance_Run_Enabled = 0;
 			Stop_Flag = 1;
 			Move_X = 0;
 			Move_Z = 0;
@@ -106,9 +150,18 @@ int main(void)
 
 		if(system_state == SYS_WAIT_START)
 		{
+			Balance_Run_Enabled = 0;
 			Show_Wait_Start_State();
+			if(!PI_Comm_IsSystemReady())
+			{
+				Restore_Normal_Mode_Safe();
+				Show_Fault_Recovery_State();
+				system_state = SYS_FAULT_RECOVERY;
+				continue;
+			}
 			if(Key1_State(1))
 			{
+				Balance_Run_Enabled = 1;
 				Stop_Flag = 0;
 				PI_Comm_SendEventCode(0x10);
 				OLED_Draw_Line("running...         ", 2, false, true);
@@ -117,8 +170,21 @@ int main(void)
 			continue;
 		}
 
+		if(system_state == SYS_FAULT_RECOVERY)
+		{
+			Balance_Run_Enabled = 0;
+			Show_Fault_Recovery_State();
+			if(PI_Comm_IsSystemReady())
+			{
+				Show_Wait_Start_State();
+				system_state = SYS_WAIT_START;
+			}
+			continue;
+		}
+
 		if(system_state == SYS_SHUTDOWN_WAIT)
 		{
+			Balance_Run_Enabled = 0;
 			Show_Shutdown_State();
 			if(PI_Comm_GetHostStateFlags() & 0x08)
 			{
@@ -130,11 +196,23 @@ int main(void)
 
 		if(Key1_State(1))
 		{
+			Balance_Run_Enabled = 0;
 			Stop_Flag = 1;
 			Move_X = 0;
 			Move_Z = 0;
 			system_state = SYS_MODE_SELECT;
 			continue;
+		}
+
+		if(system_state == SYS_RUNNING)
+		{
+			if(PI_Comm_HasHeartbeatTimeout() || !PI_Comm_IsSystemReady())
+			{
+				Restore_Normal_Mode_Safe();
+				Show_Fault_Recovery_State();
+				system_state = SYS_FAULT_RECOVERY;
+				continue;
+			}
 		}
 
 		if(mode == Normal || mode == Weight_M)//正常模式、负重模式  //Normal mode, load mode

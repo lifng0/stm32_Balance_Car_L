@@ -96,6 +96,7 @@ extern u8 lower_power_flag; 														//低电压标志,电压恢复标志 L
 extern u8 Flag_velocity; 																//速度控制相关变量 Speed control related variables
 extern enCarState g_newcarstate; 												//小车状态标志 Car status indicator
 extern u8 Stop_Flag;																		//停止标志  Stop sign
+extern u8 Balance_Run_Enabled;													//允许运行平衡环  Balance loop arm flag
 extern  float Car_Target_Velocity,Car_Turn_Amplitude_speed; //前进速度 旋转速度  Forward speed and rotational speed
 
 extern float Mid_Angle;																		//机械中值  Mechanical median

@@ -43,3 +43,27 @@
 3. 进入容器执行 `build_workspace.sh`
 4. 运行 `run_bridge.sh`
 5. 后续再扩展到 `run_bringup.sh`
+
+## 开机自启
+
+如果希望树莓派开机后自动拉起容器内 `ROS 2 bringup`，当前仓库已经提供：
+
+- `tools/start_ros2_bringup.sh`
+- `tools/balance_car_ros2.service`
+
+推荐安装方式：
+
+1. 将 `tools/start_ros2_bringup.sh` 部署到：
+   - `~/workspace/balance_car/scripts/start_ros2_bringup.sh`
+2. 给脚本执行权限：
+   - `chmod +x ~/workspace/balance_car/scripts/start_ros2_bringup.sh`
+3. 将 `tools/balance_car_ros2.service` 部署到：
+   - `/etc/systemd/system/balance_car_ros2.service`
+4. 执行：
+   - `sudo systemctl daemon-reload`
+   - `sudo systemctl enable --now balance_car_ros2.service`
+
+它的启动逻辑是：
+
+- 先等待 `balance-car-coordinator.service` 提供的本地后端 `127.0.0.1:8765` 就绪
+- 然后再执行容器内的 `ros2 launch balance_car_bringup system.launch.py`
