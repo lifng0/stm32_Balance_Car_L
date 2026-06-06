@@ -26,5 +26,12 @@ def generate_launch_description():
                 condition=IfCondition(PythonExpression(["'", task, "' == 'follow'"])),
                 parameters=[{"backend_host": LaunchConfiguration("backend_host"), "backend_port": LaunchConfiguration("backend_port")}],
             ),
+            Node(
+                package="balance_car_navigation",
+                executable="lidar_track_node",
+                name="lidar_track_node",
+                condition=IfCondition(PythonExpression(["'", task, "' == 'track'"])),
+                parameters=[{"backend_host": LaunchConfiguration("backend_host"), "backend_port": LaunchConfiguration("backend_port")}],
+            ),
         ]
     )
