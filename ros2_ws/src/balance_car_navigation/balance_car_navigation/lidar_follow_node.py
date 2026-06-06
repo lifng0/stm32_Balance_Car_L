@@ -93,6 +93,11 @@ class LidarFollowNode(Node):
         command = ("stop", reason)
         if command == self.last_command:
             return
+        move_x = float(self.car_state.get("move_x", 0.0) or 0.0)
+        move_z = float(self.car_state.get("move_z", 0.0) or 0.0)
+        if abs(move_x) < 1e-3 and abs(move_z) < 1e-3 and self.system_state.get("system_mode") != "running":
+            self.last_command = command
+            return
         try:
             self.adapter.set_move(0.0, 0.0)
             self.last_command = command
