@@ -1,95 +1,72 @@
-from std_msgs.msg import String
 import rclpy
 from rclpy.node import Node
-
-from .controller_adapter import BackendControllerAdapter
-from .lidar_utils import clamp, decode_json_message, is_system_permitted
-
+from std_msgs.msg import String
+import json
 
 class LidarAvoidNode(Node):
-    def __init__(self) -> None:
-        super().__init__("lidar_avoid_node")
-        self.declare_parameter("backend_host", "127.0.0.1")
-        self.declare_parameter("backend_port", 8765)
-        self.declare_parameter("warning_distance", 0.80)
-        self.declare_parameter("stop_distance", 0.45)
-        self.declare_parameter("turn_clear_distance", 0.70)
-        self.declare_parameter("forward_speed", 8.0)
-        self.declare_parameter("slow_speed", 4.0)
-        self.declare_parameter("turn_speed", 8.0)
+    def __init__(self):
+        super().__init__('lidar_avoid_node')
 
-        self.adapter = BackendControllerAdapter(
-            self.get_parameter("backend_host").get_parameter_value().string_value,
-            self.get_parameter("backend_port").get_parameter_value().integer_value,
+        # 严格对齐接口文档 7.2 节的避障核心参数，完全满足你“高于雷达高度才处理”的平面逻辑
+        self.warning_distance = 0.80       # 开始预警减速的距离（0.8米）
+        self.stop_distance = 0.45          # 触发紧急刹车的危险红线（0.45米）
+        
+        # 调试期模拟的底盘控制档位速度
+        self.forward_speed = 8.0           # 正常前进
+        self.slow_speed = 4.0              # 减速前进
+        self.turn_speed = 8.0              # 原地转身速度
+
+        # 订阅队友写好的雷达服务发布的唯一 JSON 摘要话题
+        self.subscription = self.create_subscription(
+            String,
+            '/lidar/summary_json',
+            self.lidar_callback,
+            10
         )
-        self.warning_distance = self.get_parameter("warning_distance").get_parameter_value().double_value
-        self.stop_distance = self.get_parameter("stop_distance").get_parameter_value().double_value
-        self.turn_clear_distance = self.get_parameter("turn_clear_distance").get_parameter_value().double_value
-        self.forward_speed = self.get_parameter("forward_speed").get_parameter_value().double_value
-        self.slow_speed = self.get_parameter("slow_speed").get_parameter_value().double_value
-        self.turn_speed = self.get_parameter("turn_speed").get_parameter_value().double_value
+        self.get_logger().info("🚀 [避障大脑已就绪] 正在全神贯注监听 /lidar/summary_json 的变化...")
 
-        self.system_state = {}
-        self.last_command = None
-
-        self.create_subscription(String, "/car/system_state_json", self.on_system_state, 10)
-        self.create_subscription(String, "/lidar/summary_json", self.on_lidar, 10)
-
-    def on_system_state(self, msg: String) -> None:
-        self.system_state = decode_json_message(msg.data)
-
-    def on_lidar(self, msg: String) -> None:
-        lidar = decode_json_message(msg.data)
-        if not is_system_permitted(self.system_state) or not lidar.get("scan_ok"):
-            self.issue_stop("system_not_ready_or_scan_invalid")
-            return
-
-        front = float(lidar.get("front_min_distance_m") or 0.0)
-        left = float(lidar.get("front_left_min_distance_m") or 0.0)
-        right = float(lidar.get("front_right_min_distance_m") or 0.0)
-
-        if front > self.warning_distance:
-            self.issue_move(self.forward_speed, 0.0, "forward")
-            return
-
-        if front > self.stop_distance:
-            self.issue_move(self.slow_speed, 0.0, "slow_forward")
-            return
-
-        turn = self.turn_speed
-        if left >= max(right, self.turn_clear_distance):
-            self.issue_move(0.0, -turn, "turn_left")
-        elif right >= max(left, self.turn_clear_distance):
-            self.issue_move(0.0, turn, "turn_right")
-        elif left >= right:
-            self.issue_move(0.0, -turn, "turn_left_tight")
-        else:
-            self.issue_move(0.0, turn, "turn_right_tight")
-
-    def issue_move(self, move_x: float, move_z: float, reason: str) -> None:
-        move_x = clamp(move_x, -30.0, 30.0)
-        move_z = clamp(move_z, -30.0, 30.0)
-        command = ("move", round(move_x, 3), round(move_z, 3), reason)
-        if command == self.last_command:
-            return
+    def lidar_callback(self, msg):
+        """核心决策流：减速 -> 刹车 -> 换向"""
         try:
-            self.adapter.set_move(move_x, move_z)
-            self.last_command = command
-        except Exception as exc:
-            self.get_logger().warning(f"avoid command failed: {exc}")
+            # 1. 解包队友雷达发来的数据
+            data = json.loads(msg.data or "{}")
+            
+            # 如果雷达当前无效（比如被队友手挡住了导致死区），处于安全考虑直接静止
+            if not data.get("scan_ok", False):
+                self.get_logger().info("⏳ 雷达数据不可用或正在重启，小车保持原地待命。")
+                return
 
-    def issue_stop(self, reason: str) -> None:
-        command = ("stop", reason)
-        if command == self.last_command:
-            return
-        try:
-            self.adapter.set_move(0.0, 0.0)
-            self.last_command = command
-        except Exception as exc:
-            self.get_logger().warning(f"avoid stop failed: {exc}")
+            # 2. 读取文档规定的三个方向的雷达水平面距离（单位：米）
+            front = data.get("front_min_distance_m", 10.0)
+            front_left = data.get("front_left_min_distance_m", 10.0)
+            front_right = data.get("front_right_min_distance_m", 10.0)
 
+            # 状态控制判断：
+            # 【情况 1：正常前进】
+            if front > self.warning_distance:
+                self.get_logger().info(f"🟢 道路安全 (前方距离:{front:.2f}m) -> 执行：正常速度前进 [{self.forward_speed}]")
 
-def main(args=None) -> None:
+            # 【情况 2：进入预警，缓慢蹭着走】
+            elif self.stop_distance < front <= self.warning_distance:
+                self.get_logger().info(f"🟡 接近障碍 (前方距离:{front:.2f}m) -> 执行：减速缓慢前进 [{self.slow_speed}]")
+
+            # 【情况 3：离得太近了！触发你的专属修正：先刹车，再换向！】
+            elif front <= self.stop_distance:
+                self.get_logger().warn(f"🔴 危险！前方距离({front:.2f}m)已踩红线！激活保护策略：")
+                
+                # 第一步：物理刹车（这里打印出动作，后续配合队友的脚本真正控车）
+                self.get_logger().warn("   👉 [第一步：紧急刹车]：速度强制归零 0.0，稳住重心，消除向前惯性！")
+                
+                # 第二步：比对左右两边哪边空旷，往更空的一边给转向速度
+                if front_left >= front_right:
+                    self.get_logger().info(f"   👉 [第二步：左侧较空] (左:{front_left:.2f}m >= 右:{front_right:.2f}m) -> 决定：向左原地旋转转身")
+                else:
+                    self.get_logger().info(f"   👉 [第二步：右侧较空] (右:{front_right:.2f}m > 左:{front_left:.2f}m) -> 决定：向右原地旋转转身")
+
+        except Exception as e:
+            self.get_logger().error(f"大脑决策发生非预期错误: {e}")
+
+def main(args=None):
     rclpy.init(args=args)
     node = LidarAvoidNode()
     try:
@@ -98,3 +75,6 @@ def main(args=None) -> None:
         pass
     node.destroy_node()
     rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
