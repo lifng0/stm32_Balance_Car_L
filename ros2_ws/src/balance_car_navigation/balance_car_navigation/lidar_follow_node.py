@@ -5,6 +5,8 @@ from rclpy.node import Node
 from .controller_adapter import BackendControllerAdapter
 from .lidar_utils import clamp, decode_json_message, is_system_permitted
 
+MODE_LIDAR_FOLLOW = 8
+
 
 class LidarFollowNode(Node):
     def __init__(self) -> None:
@@ -32,16 +34,27 @@ class LidarFollowNode(Node):
         self.max_track_angle_deg = self.get_parameter("max_track_angle_deg").get_parameter_value().double_value
 
         self.system_state = {}
+        self.car_state = {}
         self.last_command = None
 
         self.create_subscription(String, "/car/system_state_json", self.on_system_state, 10)
+        self.create_subscription(String, "/car/state_json", self.on_car_state, 10)
         self.create_subscription(String, "/lidar/summary_json", self.on_lidar, 10)
 
     def on_system_state(self, msg: String) -> None:
         self.system_state = decode_json_message(msg.data)
 
+    def on_car_state(self, msg: String) -> None:
+        self.car_state = decode_json_message(msg.data)
+
+    def mode_permitted(self) -> bool:
+        return int(self.car_state.get("mode", -1) or -1) == MODE_LIDAR_FOLLOW
+
     def on_lidar(self, msg: String) -> None:
         lidar = decode_json_message(msg.data)
+        if not self.mode_permitted():
+            self.issue_stop("mode_not_lidar_follow")
+            return
         if not is_system_permitted(self.system_state) or not lidar.get("scan_ok"):
             self.issue_stop("system_not_ready_or_scan_invalid")
             return
