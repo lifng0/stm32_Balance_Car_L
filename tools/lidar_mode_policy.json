@@ -12,24 +12,12 @@
       "name": "Weight_M",
       "lidar_enabled": false
     },
-    "2": {
-      "name": "K210_QR",
-      "lidar_enabled": false
-    },
     "3": {
       "name": "K210_Line",
       "lidar_enabled": false
     },
     "4": {
       "name": "K210_Follow",
-      "lidar_enabled": false
-    },
-    "5": {
-      "name": "K210_SelfLearn",
-      "lidar_enabled": false
-    },
-    "6": {
-      "name": "K210_mnist",
       "lidar_enabled": false
     },
     "7": {

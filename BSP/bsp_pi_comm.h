@@ -9,5 +9,6 @@ uint8_t PI_Comm_GetHostStateFlags(void);
 uint8_t PI_Comm_IsSystemReady(void);
 uint8_t PI_Comm_HasHeartbeatTimeout(void);
 void PI_Comm_SendEventCode(uint8_t event_code);
+void PI_Comm_OnByteReceived(uint8_t rx_data);
 
 #endif

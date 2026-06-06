@@ -21,6 +21,8 @@ setup(
         "console_scripts": [
             "lidar_avoid_node = balance_car_navigation.lidar_avoid_node:main",
             "lidar_follow_node = balance_car_navigation.lidar_follow_node:main",
+            "vision_line_node = balance_car_navigation.vision_line_node:main",
+            "vision_follow_node = balance_car_navigation.vision_follow_node:main",
         ],
     },
 )

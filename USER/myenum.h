@@ -82,11 +82,10 @@ typedef enum enCarState_t{
 typedef enum Car_mode_t{
 	Normal, //正常模式,包含蓝牙控制 //Normal mode, including Bluetooth controlled 
 	Weight_M,//负重模式     //Load bearing mode
-	K210_QR,//k210识别二维码  //K210 recognition QR code
-	K210_Line,//k210巡线      //K210 patrol line
-	K210_Follow,//k210跟随    //K210 Follow
-	K210_SelfLearn,//k210自主学习  需要KPU模型  //K210 autonomous learning requires KPU model
-	K210_mnist,//k210识别数字  需要KPU模型      //K210 requires KPU model to recognize numbers
+	K210_Line = 3,//k210视觉循迹  //K210 visual line tracking
+	K210_Follow,//k210目标跟踪    //K210 target following
+	Lidar_Avoid = 7,//雷达避障      //Lidar obstacle avoidance
+	Lidar_Follow,//雷达追踪        //Lidar target following
 
 	Mode_Max //最后模式的界限  //Upper bound of available modes
 }Car_Mode;

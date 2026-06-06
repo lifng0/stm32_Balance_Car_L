@@ -10,6 +10,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>balance_car_interfaces</depend>
   <depend>std_msgs</depend>
 
   <export>

@@ -27,12 +27,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="TCP backend client for balance car coordinator")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument("--timeout", type=float, default=3.0)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("ping")
     subparsers.add_parser("get-state")
     subparsers.add_parser("get-vision")
+    subparsers.add_parser("get-k210-link")
+
+    k210_text_parser = subparsers.add_parser("set-k210-text")
+    k210_text_parser.add_argument("text")
 
     mode_parser = subparsers.add_parser("set-mode")
     mode_parser.add_argument("value", type=int)
@@ -55,6 +59,11 @@ def main() -> int:
         payload["cmd"] = "get_state"
     elif args.command == "get-vision":
         payload["cmd"] = "get_vision"
+    elif args.command == "get-k210-link":
+        payload["cmd"] = "get_k210_link"
+    elif args.command == "set-k210-text":
+        payload["cmd"] = "set_k210_text"
+        payload["text"] = args.text
 
     response = request_backend(args.host, args.port, payload, args.timeout)
     print(json.dumps(response, ensure_ascii=False, indent=2))

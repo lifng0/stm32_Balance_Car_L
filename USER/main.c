@@ -41,6 +41,11 @@ typedef enum
 	SYS_SHUTDOWN_WAIT
 } System_Run_State;
 
+static uint8_t Mode_RequiresPi(Car_Mode current_mode)
+{
+	return (uint8_t)(current_mode == K210_Line || current_mode == K210_Follow || current_mode == Lidar_Follow);
+}
+
 static void Show_Pi_Init_State(void)
 {
 	uint8_t host_state = PI_Comm_GetHostStateFlags();
@@ -105,7 +110,7 @@ static void Show_Fault_Recovery_State(void)
 
 int main(void)
 {	
-	System_Run_State system_state = SYS_WAIT_PI_READY;
+	System_Run_State system_state = SYS_MODE_SELECT;
 
 	bsp_init();//基本外设初始化 //Basic peripheral initialization
 	MPU6050_EXTI_Init();		//此中断服务函数放到最后  //This interrupt service function is placed last
@@ -122,16 +127,6 @@ int main(void)
 			PI_Comm_SendEventCode(0x14);
 			system_state = SYS_SHUTDOWN_WAIT;
 			Show_Shutdown_State();
-		}
-
-		if(system_state == SYS_WAIT_PI_READY)
-		{
-			Show_Pi_Init_State();
-			if(PI_Comm_IsSystemReady())
-			{
-				system_state = SYS_MODE_SELECT;
-			}
-			continue;
 		}
 
 		if(system_state == SYS_MODE_SELECT)
@@ -151,12 +146,17 @@ int main(void)
 		if(system_state == SYS_WAIT_START)
 		{
 			Balance_Run_Enabled = 0;
+			Show_Pi_Init_State();
 			Show_Wait_Start_State();
-			if(!PI_Comm_IsSystemReady())
+			if(Mode_RequiresPi(mode) && !PI_Comm_IsSystemReady())
 			{
-				Restore_Normal_Mode_Safe();
-				Show_Fault_Recovery_State();
-				system_state = SYS_FAULT_RECOVERY;
+				OLED_Draw_Line("vision waits for pi", 1, true, false);
+				OLED_Draw_Line("PI/LIDAR not ready ", 2, false, false);
+				OLED_Draw_Line("key: reselect mode ", 3, false, true);
+				if(Key1_State(1))
+				{
+					system_state = SYS_MODE_SELECT;
+				}
 				continue;
 			}
 			if(Key1_State(1))
@@ -206,7 +206,7 @@ int main(void)
 
 		if(system_state == SYS_RUNNING)
 		{
-			if(PI_Comm_HasHeartbeatTimeout() || !PI_Comm_IsSystemReady())
+			if(Mode_RequiresPi(mode) && (PI_Comm_HasHeartbeatTimeout() || !PI_Comm_IsSystemReady()))
 			{
 				Restore_Normal_Mode_Safe();
 				Show_Fault_Recovery_State();
@@ -236,19 +236,5 @@ int main(void)
 			}
 		}
 
-		else if(mode == K210_QR) //识别二维码模式  //Identify QR code patterns
-		{
-			Change_state_QR();//识别  //Identify
-		}
-		else if(mode == K210_SelfLearn) //自主学习模式 //Self directed learning mode
-		{
-			Change_state_self();
-		}
-		else if(mode == K210_mnist) //识别数字模式  //Identify numerical patterns
-		{
-			Change_state_minst();
-		}
 	}
 }
-
-

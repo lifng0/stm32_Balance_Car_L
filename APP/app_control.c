@@ -42,15 +42,6 @@ void EXTI15_10_IRQHandler(void)
 				intstop_time --;
 		}
 			
-		if (mode == K210_Line)//k210巡线 K210 patrol line
-		{
-			Set_K210track_speed();
-		}
-		else if(mode == K210_Follow)
-		{
-			APP_K210X_Y_Follow_PID();//k210颜色跟随 K210 Color Follow
-		}
-		
 		Get_Angle(GET_Angle_Way);                     			//更新姿态，5ms一次，更高的采样频率可以改善卡尔曼滤波和互补滤波的效果  //Updating the posture once every 5ms, a higher sampling frequency can improve the effectiveness of Kalman filtering and complementary filtering
 		Encoder_Left=Read_Encoder(MOTOR_ID_ML);            					//读取左轮编码器的值，前进为正，后退为负   //Read the value of the left wheel encoder, forward is positive, backward is negative
 		Encoder_Right=-Read_Encoder(MOTOR_ID_MR);           					//读取右轮编码器的值，前进为正，后退为负   //Read the value of the right wheel encoder, forward is positive, backward is negative
@@ -61,14 +52,7 @@ void EXTI15_10_IRQHandler(void)
 			
 
 		//转向环PID控制  Steering loop PID control
-		if (mode == K210_Line)
-		{
-			Turn_Pwm=Turn_K210_PD(Gyro_Turn);		
-		}
-		else
-		{
-			Turn_Pwm=Turn_PD(Gyro_Turn);
-		} 
+		Turn_Pwm=Turn_PD(Gyro_Turn);
 		
 																
 	
@@ -88,7 +72,7 @@ void EXTI15_10_IRQHandler(void)
 
 		
 		//只有正常模式下检测小车的拿去和放下(姿态检测) Only in normal mode can the detection of the taking and lowering of the car be carried out (posture detection)
-		if(mode == Normal)
+		if(mode == Normal || mode == Weight_M || mode == K210_Line || mode == K210_Follow || mode == Lidar_Follow)
 		{
 			if(Pick_Up(Acceleration_Z,Angle_Balance,Encoder_Left,Encoder_Right))//检查是否小车被拿起 Check if the car has been picked up
 				Stop_Flag=1;	                           					//如果被拿起就关闭电机 If picked up, turn off the motor

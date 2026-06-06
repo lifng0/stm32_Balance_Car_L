@@ -17,13 +17,11 @@ from pi_serial_bridge import (
     CMD_HEARTBEAT,
     CMD_HEARTBEAT_ACK,
     CMD_NACK,
-    CMD_QUERY_VISION,
     CMD_QUERY_STATUS,
     CMD_SET_HOST_STATE,
     CMD_SET_MODE,
     CMD_SET_MOVE,
     CMD_STATUS,
-    CMD_VISION_STATUS,
     ERROR_NAME,
     EVENT_NAME,
     FrameParser,
@@ -54,12 +52,17 @@ VISION_TYPE_AI = 2
 MODE_NAME = {
     0: "Normal",
     1: "Weight_M",
-    2: "K210_QR",
     3: "K210_Line",
     4: "K210_Follow",
-    5: "K210_SelfLearn",
-    6: "K210_mnist",
+    7: "Lidar_Avoid",
+    8: "Lidar_Follow",
 }
+
+SUPPORTED_MODE_IDS = {0, 1, 3, 4, 8}
+K210_VISION_MODES = {3, 4}
+LINE_MODE_ID = 3
+FOLLOW_MODE_ID = 4
+K210_ALWAYS_CONNECTED = True
 
 DEFAULT_LIDAR_POLICY = {
     "default_enabled": False,
@@ -69,11 +72,8 @@ DEFAULT_LIDAR_POLICY = {
     "modes": {
         "0": {"name": "Normal", "lidar_enabled": False},
         "1": {"name": "Weight_M", "lidar_enabled": False},
-        "2": {"name": "K210_QR", "lidar_enabled": False},
         "3": {"name": "K210_Line", "lidar_enabled": False},
         "4": {"name": "K210_Follow", "lidar_enabled": False},
-        "5": {"name": "K210_SelfLearn", "lidar_enabled": False},
-        "6": {"name": "K210_mnist", "lidar_enabled": False},
         "7": {"name": "Lidar_Avoid", "lidar_enabled": True},
         "8": {"name": "Lidar_Follow", "lidar_enabled": True},
         "9": {"name": "Lidar_SLAM", "lidar_enabled": True},
@@ -84,6 +84,19 @@ DEFAULT_LIDAR_POLICY_PATH = Path.home() / "workspace" / "balance_car" / "scripts
 
 def log(message: str) -> None:
     print(f"[pi-coordinator] {message}", flush=True)
+
+
+def sanitize_k210_text(text: str, max_len: int = 48) -> str:
+    sanitized = []
+    for ch in str(text):
+        code = ord(ch)
+        if ch in "\r\n\t":
+            sanitized.append(" ")
+        elif 32 <= code <= 126:
+            sanitized.append(ch)
+        else:
+            sanitized.append("?")
+    return "".join(sanitized).strip()[:max_len]
 
 
 def load_lidar_policy(policy_path: Path | None) -> dict:
@@ -334,7 +347,15 @@ class CoordinatorBackendHandler(socketserver.StreamRequestHandler):
         except Exception:
             response = {"ok": False, "error": "bad_json"}
         else:
-            response = self.server.coordinator.handle_backend_request(request)
+            try:
+                response = self.server.coordinator.handle_backend_request(request)
+            except Exception as exc:
+                response = {
+                    "ok": False,
+                    "error": "backend_exception",
+                    "message": str(exc),
+                    "type": type(exc).__name__,
+                }
 
         self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
 
@@ -398,12 +419,386 @@ def parse_vision_payload(payload: bytes) -> dict:
     return result
 
 
+def parse_k210_uart_message(mode_id: int | None, body: str) -> dict:
+    mode_value = int(mode_id) if mode_id is not None else -1
+    result = {
+        "source": "k210_uart",
+        "transport": "usb_serial",
+        "mode": mode_value,
+        "mode_name": MODE_NAME.get(mode_value, str(mode_value)),
+        "valid": True,
+        "raw": body,
+        "timestamp": time.time(),
+    }
+
+    parts = body.split(":", 1)
+    prefix = parts[0].strip().upper() if parts else ""
+    detail = parts[1].strip() if len(parts) > 1 else ""
+
+    if prefix in ("BOOT", "PONG", "ACK", "ERR", "SHOW_OK", "STATUS", "COLOR"):
+        result["message_type"] = prefix
+
+    if prefix == "BOOT":
+        result["vision_type"] = VISION_TYPE_TEXT
+        result["text"] = detail or body
+        result["valid"] = True
+        return result
+
+    if prefix == "PONG":
+        result["vision_type"] = VISION_TYPE_TEXT
+        result["text"] = "PONG"
+        result["valid"] = True
+        return result
+
+    if prefix in ("ACK", "ERR", "SHOW_OK"):
+        result["vision_type"] = VISION_TYPE_TEXT
+        result["text"] = detail or body
+        result["valid"] = prefix != "ERR"
+        return result
+
+    if prefix == "STATUS":
+        result["vision_type"] = VISION_TYPE_TEXT
+        result["text"] = detail or body
+        result["valid"] = True
+        for item in detail.split(","):
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            result[key] = value
+        if "target" in result:
+            result["color_target"] = result["target"]
+        if "detected" in result:
+            result["detected"] = result["detected"] not in ("0", "false", "False", "")
+        return result
+
+    if prefix == "COLOR":
+        fields = [item.strip() for item in detail.split(",") if item.strip()]
+        result["vision_type"] = VISION_TYPE_AI
+        result["target_type"] = "follow"
+        result["valid"] = False
+        if fields:
+            result["color_name"] = fields[0]
+            if fields[0].upper() != "NONE":
+                result["valid"] = True
+        if len(fields) >= 6:
+            try:
+                result["x"] = int(fields[1])
+                result["y"] = int(fields[2])
+                result["w"] = int(fields[3])
+                result["h"] = int(fields[4])
+                result["area"] = int(fields[5])
+            except ValueError:
+                pass
+        result["text"] = detail or body
+        return result
+
+    if prefix in ("LINE", "FOLLOW"):
+        fields = [item.strip() for item in detail.split(",") if item.strip()]
+        coords = []
+        for item in fields:
+            try:
+                coords.append(int(item))
+            except ValueError:
+                continue
+        x = coords[0] if len(coords) >= 1 else 0
+        y = coords[1] if len(coords) >= 2 else 0
+        w = coords[2] if len(coords) >= 3 else 0
+        h = coords[3] if len(coords) >= 4 else 0
+        result.update(
+            {
+                "vision_type": VISION_TYPE_AI,
+                "target_type": "line" if prefix == "LINE" else "follow",
+                "valid": bool(coords),
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "area": w * h,
+            }
+        )
+        return result
+
+    digits = "".join(ch for ch in body if ch.isdigit())
+    if mode_value in K210_VISION_MODES and len(digits) >= 6:
+        x = int(digits[0:3])
+        y = int(digits[3:6])
+        w = int(digits[6:9]) if len(digits) >= 9 else 0
+        h = int(digits[9:12]) if len(digits) >= 12 else 0
+        target_type = "follow" if mode_value == FOLLOW_MODE_ID else "line"
+        area = w * h
+        result.update(
+            {
+                "vision_type": VISION_TYPE_AI,
+                "target_type": target_type,
+                "valid": True,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "area": area,
+            }
+        )
+        return result
+
+    result["vision_type"] = VISION_TYPE_TEXT
+    result["text"] = body
+    return result
+
+
+class HostK210Worker:
+    def __init__(
+        self,
+        preferred_device: str | None,
+        baudrate: int,
+        mode_provider,
+    ) -> None:
+        self.preferred_device = preferred_device
+        self.baudrate = baudrate
+        self.mode_provider = mode_provider
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._serial: serial.Serial | None = None
+        self._port = ""
+        self._ready = False
+        self._enabled = False
+        self._last_error = ""
+        self._last_rx_at = 0.0
+        self._vision_state: dict | None = None
+        self._last_requested_remote_mode: str | None = None
+        self._buffer = bytearray()
+        self._collecting = False
+        self._line_buffer = bytearray()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._close_serial()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def set_enabled(self, enabled: bool) -> None:
+        should_disable = False
+        with self._lock:
+            previous_enabled = self._enabled
+            self._enabled = bool(enabled)
+            if previous_enabled and not self._enabled:
+                self._ready = False
+                self._last_error = ""
+                self._last_requested_remote_mode = None
+                should_disable = True
+        if should_disable:
+            self._stop_remote_activity()
+            self._close_serial()
+
+    def is_enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def snapshot(self) -> tuple[str, dict | None, bool, str, float]:
+        with self._lock:
+            return (
+                self._port,
+                None if self._vision_state is None else dict(self._vision_state),
+                self._ready,
+                self._last_error,
+                self._last_rx_at,
+            )
+
+    def wait_until_ready(self, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                handle = self._serial
+                if self._ready and handle is not None and handle.is_open:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def send_text(self, text: str) -> None:
+        self.set_enabled(True)
+        if not self.wait_until_ready(timeout=1.0):
+            raise RuntimeError("k210 serial not connected")
+        clean_text = sanitize_k210_text(text)
+        if not clean_text:
+            raise RuntimeError("k210 text is empty after sanitization")
+        payload = (clean_text + "\n").encode("ascii", errors="replace")
+        with self._lock:
+            handle = self._serial
+        if handle is None or not handle.is_open:
+            raise RuntimeError("k210 serial not connected")
+        handle.write(payload)
+        handle.flush()
+
+    def _send_best_effort(self, text: str) -> None:
+        clean_text = sanitize_k210_text(text)
+        if not clean_text:
+            return
+        with self._lock:
+            handle = self._serial
+        if handle is None or not handle.is_open:
+            return
+        try:
+            handle.write((clean_text + "\n").encode("ascii", errors="replace"))
+            handle.flush()
+        except Exception:
+            pass
+
+    def _stop_remote_activity(self) -> None:
+        # Explicitly park the K210 in idle mode before closing the serial
+        # link so it won't keep running a visual demo after we leave
+        # vision-related modes during mode selection.
+        self._send_best_effort("COLOR:STOP")
+        self._send_best_effort("MODE:IDLE")
+        self._last_requested_remote_mode = "IDLE"
+
+    def sync_remote_mode(self, desired_mode: str) -> None:
+        normalized_mode = desired_mode.strip().upper()
+        if not normalized_mode:
+            return
+        self.set_enabled(True)
+        if not self.wait_until_ready(timeout=1.0):
+            raise RuntimeError("k210 serial not connected")
+        if normalized_mode == self._last_requested_remote_mode:
+            return
+        self._send_best_effort(f"MODE:{normalized_mode}")
+        self._last_requested_remote_mode = normalized_mode
+
+    def _set_error(self, message: str) -> None:
+        with self._lock:
+            self._last_error = message
+
+    def _set_ready(self, ready: bool) -> None:
+        with self._lock:
+            self._ready = ready
+
+    def _resolved_port(self) -> str:
+        if self.preferred_device:
+            return str(self.preferred_device)
+        return detect_k210_port(None)
+
+    def _connect(self) -> None:
+        port = self._resolved_port()
+        handle = serial.Serial(port, baudrate=self.baudrate, timeout=0.1)
+        with self._lock:
+            self._serial = handle
+            self._port = port
+            self._ready = True
+            self._last_error = ""
+        self._collecting = False
+        self._buffer = bytearray()
+        self._line_buffer = bytearray()
+
+    def _close_serial(self) -> None:
+        with self._lock:
+            handle = self._serial
+            self._serial = None
+            self._ready = False
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+    def _handle_frame(self, body: str) -> None:
+        parsed = parse_k210_uart_message(self.mode_provider(), body)
+        with self._lock:
+            self._vision_state = parsed
+            self._last_rx_at = time.time()
+
+    def _handle_line(self, body: str) -> None:
+        text = body.strip()
+        if not text:
+            return
+        self._handle_frame(text)
+
+    def _feed_bytes(self, data: bytes) -> None:
+        for value in data:
+            if value in (ord("\r"), ord("\n")):
+                if self._line_buffer:
+                    body = self._line_buffer.decode("utf-8", errors="replace")
+                    self._line_buffer = bytearray()
+                    self._handle_line(body)
+                continue
+            if value == ord("$") and not self._collecting:
+                self._collecting = True
+                self._buffer = bytearray()
+                continue
+            if not self._collecting:
+                self._line_buffer.append(value)
+                if len(self._line_buffer) > 128:
+                    body = self._line_buffer.decode("utf-8", errors="replace")
+                    self._line_buffer = bytearray()
+                    self._handle_line(body)
+                continue
+            if value == ord("#"):
+                body = self._buffer.decode("utf-8", errors="replace")
+                self._collecting = False
+                self._buffer = bytearray()
+                if body:
+                    self._handle_frame(body)
+                continue
+            self._buffer.append(value)
+            if len(self._buffer) > 64:
+                self._collecting = False
+                self._buffer = bytearray()
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            if not self.is_enabled():
+                if self._serial is not None:
+                    log("k210 worker disabled, closing serial")
+                    self._close_serial()
+                time.sleep(0.1)
+                continue
+
+            if self._serial is None:
+                try:
+                    self._connect()
+                    log(f"k210 connected on {self._port}")
+                except Exception as exc:
+                    self._set_error(str(exc))
+                    log(f"k210 init retry in 1s: {exc}")
+                    time.sleep(1.0)
+                    continue
+
+            try:
+                with self._lock:
+                    handle = self._serial
+                if handle is None:
+                    time.sleep(0.1)
+                    continue
+                data = handle.read(64)
+                if not data:
+                    continue
+                with self._lock:
+                    self._last_rx_at = time.time()
+                    self._ready = True
+                    self._last_error = ""
+                self._feed_bytes(data)
+            except Exception as exc:
+                self._set_error(str(exc))
+                log(f"k210 runtime error, reconnecting: {exc}")
+                self._close_serial()
+                time.sleep(0.5)
+
+
 class STM32Coordinator:
     def __init__(
         self,
         device: str,
         baudrate: int,
         heartbeat_interval: float,
+        k210_device: str | None,
+        k210_baudrate: int,
         backend_host: str,
         backend_port: int,
         lidar_policy: dict,
@@ -414,6 +809,8 @@ class STM32Coordinator:
         self.device = device
         self.baudrate = baudrate
         self.heartbeat_interval = heartbeat_interval
+        self.k210_device = k210_device
+        self.k210_baudrate = k210_baudrate
         self.backend_host = backend_host
         self.backend_port = backend_port
         self.lidar_policy = lidar_policy
@@ -439,6 +836,10 @@ class STM32Coordinator:
         self.lidar_port = ""
         self.lidar_summary: dict | None = None
         self.vision_state: dict | None = None
+        self.k210_port = ""
+        self.k210_ready = False
+        self.k210_last_error = ""
+        self.k210_last_rx_at = 0.0
         self.lidar_enabled = bool(self.lidar_policy.get("default_enabled", False))
         self.lidar_required = False
         self.ros_ready = False
@@ -447,6 +848,7 @@ class STM32Coordinator:
         self.last_ros_nodes: list[str] = []
         self.last_ros_required_nodes: list[str] = []
         self.host_state_supported = True
+        self.k210_worker: HostK210Worker | None = None
         self.lidar_worker: HostLidarWorker | None = None
         self.last_lidar_demand_at = 0.0
         self.last_control_state: dict | None = None
@@ -461,6 +863,8 @@ class STM32Coordinator:
 
     def close(self) -> None:
         self.stop_backend_server()
+        if self.k210_worker is not None:
+            self.k210_worker.stop()
         if self.lidar_worker is not None:
             self.lidar_worker.stop()
         self.serial.close()
@@ -607,13 +1011,46 @@ class STM32Coordinator:
         return self.current_status
 
     def query_vision(self, timeout: float = 1.0) -> dict | None:
-        with self.serial_lock:
-            seq = self._write_frame_unlocked(CMD_QUERY_VISION)
-            frame = self.wait_for_cmd(CMD_VISION_STATUS, seq, timeout)
-            if frame and frame["ok"]:
-                with self.state_lock:
-                    self.vision_state = parse_vision_payload(frame["payload"])
+        _ = timeout
+        self.refresh_k210_state()
         return self.vision_state
+
+    def mode_needs_k210(self, mode_id: int | None) -> bool:
+        if K210_ALWAYS_CONNECTED:
+            return True
+        return mode_id in K210_VISION_MODES
+
+    def desired_k210_remote_mode(self, mode_id: int | None) -> str:
+        if mode_id == FOLLOW_MODE_ID:
+            return "COLOR"
+        return "IDLE"
+
+    def refresh_k210_state(self, force_enabled: bool = False) -> None:
+        if self.k210_worker is None:
+            return
+        mode_id = self.current_mode_id()
+        desired_enabled = force_enabled or self.mode_needs_k210(mode_id)
+        previous_enabled = self.k210_worker.is_enabled()
+        if desired_enabled != previous_enabled:
+            log(f"k210 {'enable' if desired_enabled else 'disable'} by mode={mode_id} force={force_enabled}")
+        self.k210_worker.set_enabled(desired_enabled)
+        if desired_enabled:
+            desired_remote_mode = self.desired_k210_remote_mode(mode_id)
+            try:
+                self.k210_worker.sync_remote_mode(desired_remote_mode)
+            except Exception as exc:
+                log(f"k210 mode sync failed: {exc}")
+        k210_port, vision_state, k210_ready, k210_last_error, k210_last_rx_at = self.k210_worker.snapshot()
+        with self.state_lock:
+            if k210_port:
+                self.k210_port = k210_port
+            self.k210_ready = k210_ready
+            self.k210_last_error = k210_last_error
+            self.k210_last_rx_at = k210_last_rx_at
+            if not desired_enabled:
+                self.vision_state = None
+            elif vision_state is not None:
+                self.vision_state = vision_state
 
     def _request_ack(self, command: int, payload: bytes = b"", timeout: float = 1.0) -> dict:
         with self.serial_lock:
@@ -655,7 +1092,7 @@ class STM32Coordinator:
 
     def set_move_command(self, move_x: float, move_z: float) -> dict:
         clamped_x = max(-30.0, min(30.0, float(move_x)))
-        clamped_z = max(-30.0, min(30.0, float(move_z)))
+        clamped_z = max(-120.0, min(120.0, float(move_z)))
         payload = struct.pack("<hh", int(round(clamped_x * 10.0)), int(round(clamped_z * 10.0)))
         response = self._request_ack(CMD_SET_MOVE, payload)
         response["move_x"] = clamped_x
@@ -851,6 +1288,7 @@ class STM32Coordinator:
         subprocess.run(["sudo", "poweroff"], check=False)
 
     def snapshot_state(self) -> dict:
+        self.refresh_k210_state()
         if self.lidar_worker is not None:
             lidar_port, lidar_summary, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
             with self.state_lock:
@@ -885,6 +1323,11 @@ class STM32Coordinator:
                 "last_event_name": self.last_event_name,
                 "event_counter": self.event_counter,
                 "stm32_device": self.device,
+                "k210_device": self.k210_device,
+                "k210_port": self.k210_port,
+                "k210_ready": self.k210_ready,
+                "k210_last_error": self.k210_last_error,
+                "k210_last_rx_at": self.k210_last_rx_at,
                 "lidar_port": self.lidar_port,
                 "lidar_enabled": self.lidar_enabled,
                 "lidar_required": self.lidar_required,
@@ -913,7 +1356,34 @@ class STM32Coordinator:
             return self.snapshot_state()
 
         if command == "get_vision":
+            self.refresh_k210_state()
             return {"ok": True, "vision_state": self.vision_state, "timestamp": time.time()}
+
+        if command == "get_k210_link":
+            self.refresh_k210_state()
+            return {
+                "ok": True,
+                "k210_device": self.k210_device,
+                "k210_port": self.k210_port,
+                "k210_ready": self.k210_ready,
+                "k210_last_error": self.k210_last_error,
+                "k210_last_rx_at": self.k210_last_rx_at,
+                "vision_state": self.vision_state,
+                "timestamp": time.time(),
+            }
+
+        if command == "set_k210_text":
+            text = sanitize_k210_text(str(request.get("text", "")))
+            if not text:
+                return {"ok": False, "error": "bad_value", "cmd": command}
+            if self.k210_worker is None:
+                return {"ok": False, "error": "k210_unavailable", "cmd": command}
+            try:
+                self.refresh_k210_state(force_enabled=True)
+                self.k210_worker.send_text(text)
+            except Exception as exc:
+                return {"ok": False, "error": "k210_write_failed", "cmd": command, "message": str(exc)}
+            return {"ok": True, "cmd": command, "text": text, "timestamp": time.time()}
 
         if command == "set_ros_ready":
             ready = bool(request.get("ready", False))
@@ -926,6 +1396,15 @@ class STM32Coordinator:
             value = request.get("value")
             if not isinstance(value, int):
                 return {"ok": False, "error": "bad_value", "cmd": command}
+            if value not in SUPPORTED_MODE_IDS:
+                return {
+                    "ok": False,
+                    "error": "unsupported_mode",
+                    "cmd": command,
+                    "value": value,
+                    "message": f"supported modes are {sorted(SUPPORTED_MODE_IDS)}",
+                    "timestamp": time.time(),
+                }
             return self.remember_control_state(self.set_mode_command(value))
 
         if command == "set_move":
@@ -959,6 +1438,12 @@ class STM32Coordinator:
     def run(self, sdk_root: Path, lidar_device: str | None, lidar_baudrate: int, scan_frequency: float) -> int:
         log(f"stm32 device={self.device} baudrate={self.baudrate}")
         self.start_backend_server()
+        self.k210_worker = HostK210Worker(
+            preferred_device=self.k210_device,
+            baudrate=self.k210_baudrate,
+            mode_provider=self.current_mode_id,
+        )
+        self.k210_worker.start()
         startup_retries = 0
         max_startup_retries = 3
         while startup_retries < max_startup_retries and not self.send_host_state(HOST_STATE_PI_READY):
@@ -987,7 +1472,7 @@ class STM32Coordinator:
         self.lidar_worker.start()
         self.system_mode = "mode_select"
         self.query_status(timeout=1.0)
-        self.query_vision(timeout=1.0)
+        self.refresh_k210_state()
         self.refresh_lidar_state()
         log("reported SYSTEM_READY")
 
@@ -1000,7 +1485,7 @@ class STM32Coordinator:
 
             if time.time() - self.last_status_refresh_at >= self.status_refresh_interval:
                 self.query_status(timeout=0.2)
-                self.query_vision(timeout=0.2)
+                self.refresh_k210_state()
                 self.last_status_refresh_at = time.time()
                 self.refresh_lidar_state()
                 self.sync_host_state_if_needed(min_interval=1.0)
@@ -1048,11 +1533,42 @@ def detect_stm32_port(preferred: str | None) -> str:
     raise RuntimeError("No STM32 serial device found.")
 
 
+def k210_candidate_score(path: Path) -> int:
+    name = path.name.lower()
+    score = 0
+    if "silicon_labs" in name or "cp210" in name:
+        score += 80
+    if "ydlidar" in name:
+        score -= 100
+    return score
+
+
+def detect_k210_port(preferred: str | None) -> str:
+    if preferred:
+        return preferred
+
+    serial_by_id = Path("/dev/serial/by-id")
+    if serial_by_id.exists():
+        candidates = sorted(serial_by_id.iterdir())
+        filtered = [item for item in candidates if "ydlidar" not in item.name.lower()]
+        if filtered:
+            best = max(filtered, key=k210_candidate_score)
+            if k210_candidate_score(best) > 0:
+                return str(best)
+
+    for candidate in sorted(Path("/dev").glob("ttyUSB*")):
+        return str(candidate)
+
+    raise RuntimeError("No K210 serial device found.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Raspberry Pi coordinator for STM32 balance car")
     parser.add_argument("--stm32-device", default=None, help="STM32 serial device path, auto-detect if omitted")
     parser.add_argument("--stm32-baudrate", type=int, default=115200)
     parser.add_argument("--heartbeat-interval", type=float, default=0.1)
+    parser.add_argument("--k210-device", default=None, help="K210 serial device path, auto-detect if omitted")
+    parser.add_argument("--k210-baudrate", type=int, default=115200)
     parser.add_argument("--lidar-device", default=None, help="Lidar serial device path, auto-detect if omitted")
     parser.add_argument("--lidar-baudrate", type=int, default=230400)
     parser.add_argument("--lidar-scan-frequency", type=float, default=10.0)
@@ -1073,6 +1589,8 @@ def main() -> int:
         device=stm32_device,
         baudrate=args.stm32_baudrate,
         heartbeat_interval=args.heartbeat_interval,
+        k210_device=args.k210_device,
+        k210_baudrate=args.k210_baudrate,
         backend_host=args.backend_host,
         backend_port=args.backend_port,
         lidar_policy=lidar_policy,

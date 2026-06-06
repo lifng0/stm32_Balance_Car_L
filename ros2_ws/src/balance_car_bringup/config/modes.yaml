@@ -1,8 +1,5 @@
 modes:
   0: Normal
   1: Weight_M
-  2: K210_QR
   3: K210_Line
   4: K210_Follow
-  5: K210_SelfLearn
-  6: K210_mnist

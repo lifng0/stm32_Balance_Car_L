@@ -407,7 +407,11 @@ void OLED_Draw_Line(char *data, uint8_t line, bool clear, bool refresh)
 	
 		if (line > 0 && line <= 3)
 		{
-				OLED_Draw_String(data, 0, 10 * (line - 1), clear, refresh);
+				OLED_Draw_String(data, 0, 10 * (line - 1), clear, false);
+		}
+		if (refresh)
+		{
+				OLED_Refresh();
 		}
 		
 }

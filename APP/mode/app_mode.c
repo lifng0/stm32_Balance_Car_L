@@ -3,6 +3,53 @@
 uint8_t angle_max = 40;
 Car_Mode mode = Normal;//Normal; //模式为正常
 
+static uint8_t Mode_IsSelectable(Car_Mode candidate)
+{
+	return (uint8_t)(
+		candidate == Normal ||
+		candidate == Weight_M ||
+		candidate == K210_Line ||
+		candidate == K210_Follow ||
+		candidate == Lidar_Follow
+	);
+}
+
+static Car_Mode Mode_Next(Car_Mode current)
+{
+	switch (current)
+	{
+		case Normal:
+			return Weight_M;
+		case Weight_M:
+			return K210_Line;
+		case K210_Line:
+			return K210_Follow;
+		case K210_Follow:
+			return Lidar_Follow;
+		case Lidar_Follow:
+		default:
+			return Normal;
+	}
+}
+
+static Car_Mode Mode_Previous(Car_Mode current)
+{
+	switch (current)
+	{
+		case Normal:
+			return K210_Follow;
+		case Weight_M:
+			return Normal;
+		case K210_Line:
+			return Weight_M;
+		case K210_Follow:
+			return K210_Line;
+		case Lidar_Follow:
+		default:
+			return K210_Follow;
+	}
+}
+
 
 //模式选择 用手拧轮子来进行模式切换
 //Mode selection: Use the hand to twist the wheel to switch modes
@@ -38,15 +85,11 @@ void car_mode(int16_t cnt)
 	{
 		if(cnt < cnt_old)
 		{
-			mode = (Car_Mode)((mode - 1) %Mode_Max); //大到小 枚举(u8) -1即为255  Large to small   enumeration (u8) -1 is 255
-			if(mode > Mode_Max)
-			{
-				mode = (Car_Mode)(Mode_Max -1);
-			}
+			mode = Mode_Previous(mode);
 		}
 		else
 		{
-			mode = (Car_Mode)((mode + 1) %Mode_Max); //小到大  Small to Large
+			mode = Mode_Next(mode);
 		}
 		
 		cnt_old = cnt; //赋值  Assignment
@@ -66,12 +109,14 @@ void Set_Mid_Angle(void)
 			Mid_Angle = 0;
 			break;
 		
-		case K210_QR:   			
 		case K210_Line:  	 		
 		case K210_Follow:
-		case K210_SelfLearn:
-		case K210_mnist:
+		case Lidar_Follow:
 			Mid_Angle = -1;
+			break;
+
+		default:
+			Mid_Angle = 0;
 			break;
 	}
 
@@ -86,13 +131,18 @@ void Set_control_speed()
 		Car_Target_Velocity=30;
 		Car_Turn_Amplitude_speed=36;
 	}
+	else
+	{
+		Car_Target_Velocity=0;
+		Car_Turn_Amplitude_speed=0;
+	}
 }
 
 //设置跌倒的倾角
 //Set the inclination angle for falls
 void Set_angle(void)
 {
-	if((mode == K210_QR)||(mode == K210_Line)||(mode == K210_Follow)||(mode == K210_SelfLearn)||(mode == K210_mnist))
+	if((mode == K210_Line)||(mode == K210_Follow)||(mode == Lidar_Follow))
 	{
 		angle_max = 30;
 	}
@@ -107,7 +157,7 @@ void Set_angle(void)
 extern float Balance_Kp,Balance_Kd,Velocity_Kp,Velocity_Ki,Turn_Kp,Turn_Kd; //引入立直环、速度环、转向环 //Introduce vertical rings, speed rings, and steering rings
 void Set_PID(void)
 {
-	if(mode == Weight_M || mode == K210_Follow) //负重 Load bearing
+	if(mode == Weight_M || mode == K210_Follow || mode == Lidar_Follow) //负重 / 自动追踪 Load bearing / autonomous follow
 	{
 		
 		Balance_Kp =9600;
@@ -130,7 +180,7 @@ void Set_PID(void)
 		Turn_Kd=20;
 
 	}
-	else if(mode == Normal)
+	else
 	{
 		Balance_Kp =9600;
 		Balance_Kd =48 ; 

@@ -42,10 +42,6 @@ void bsp_mode_init(void)
 	{
 		bluetooth_init();								//蓝牙初始化   Bluetooth initialization
 	}
-	else if((mode == K210_QR) || (mode == K210_Line) || (mode == K210_Follow)|| (mode == K210_SelfLearn)|| (mode == K210_mnist))
-	{
-		USART2_init(115200);						//k210接口  K210 interface
-	}
 }
 
 

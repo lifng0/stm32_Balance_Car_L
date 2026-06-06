@@ -20,6 +20,7 @@ CMD_EMERGENCY_STOP = 0x07
 CMD_SET_HOST_STATE = 0x08
 CMD_QUERY_VISION = 0x09
 CMD_K210_TEXT = 0x0A
+CMD_K210_RAW = 0x0B
 
 CMD_ACK = 0x81
 CMD_NACK = 0x82
@@ -37,11 +38,10 @@ VISION_TYPE_NAME = {
 MODE_NAME = {
     0: "Normal",
     1: "Weight_M",
-    2: "K210_QR",
     3: "K210_Line",
     4: "K210_Follow",
-    5: "K210_SelfLearn",
-    6: "K210_mnist",
+    7: "Lidar_Avoid",
+    8: "Lidar_Follow",
 }
 
 EVENT_NAME = {
@@ -252,7 +252,7 @@ def main():
     enable_parser.add_argument("value", type=int, choices=[0, 1])
 
     mode_parser = subparsers.add_parser("mode")
-    mode_parser.add_argument("value", type=int, choices=range(0, 7))
+    mode_parser.add_argument("value", type=int, choices=[0, 1, 3, 4])
 
     host_state_parser = subparsers.add_parser("set-host-state")
     host_state_parser.add_argument("value", type=int, choices=range(0, 256))
