@@ -173,6 +173,59 @@ def scan_to_points(scan) -> list[tuple[float, float, float]]:
     return result
 
 
+def scan_to_laserscan_dict(scan) -> dict:
+    polar_points: list[tuple[float, float, float]] = []
+    for i in range(len(scan.points)):
+        point = scan.points[i]
+        polar_points.append((float(point.angle), float(point.range), float(point.intensity)))
+
+    if not polar_points:
+        return {
+            "points": 0,
+            "angle_min": 0.0,
+            "angle_max": 0.0,
+            "angle_increment": 0.0,
+            "scan_time": 0.0,
+            "time_increment": 0.0,
+            "range_min": 0.05,
+            "range_max": 12.0,
+            "ranges": [],
+            "intensities": [],
+        }
+
+    polar_points.sort(key=lambda item: item[0])
+    angle_min = polar_points[0][0]
+    angle_max = polar_points[-1][0]
+    point_count = len(polar_points)
+    angle_increment = 0.0 if point_count <= 1 else (angle_max - angle_min) / (point_count - 1)
+    scan_time = float(getattr(getattr(scan, "config", None), "scan_time", 0.0) or 0.0)
+    time_increment = 0.0 if point_count <= 0 else scan_time / max(point_count, 1)
+    range_min = float(getattr(getattr(scan, "config", None), "min_range", 0.05) or 0.05)
+    range_max = float(getattr(getattr(scan, "config", None), "max_range", 12.0) or 12.0)
+
+    ranges = []
+    intensities = []
+    for _, distance_m, intensity in polar_points:
+        if distance_m <= 0.0:
+            ranges.append(None)
+        else:
+            ranges.append(round(distance_m, 4))
+        intensities.append(round(float(intensity), 3))
+
+    return {
+        "points": point_count,
+        "angle_min": angle_min,
+        "angle_max": angle_max,
+        "angle_increment": angle_increment,
+        "scan_time": scan_time,
+        "time_increment": time_increment,
+        "range_min": range_min,
+        "range_max": range_max,
+        "ranges": ranges,
+        "intensities": intensities,
+    }
+
+
 def summarize_scan(scan) -> dict:
     points = scan_to_points(scan)
     closest = closest_point(points)

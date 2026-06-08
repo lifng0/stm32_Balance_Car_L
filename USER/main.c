@@ -20,7 +20,7 @@ float Angle_Balance,Gyro_Balance,Gyro_Turn;     		//平衡倾角 平衡陀螺仪
 int Motor_Left,Motor_Right;                 	  		//电机PWM变量 //Motor PWM variable
 int Temperature;                                		//温度变量 		//Temperature variable
 float Acceleration_Z;                           		//Z轴加速度计  //Z-axis accelerometer
-float Mid_Angle  = -10.3;                          						//机械中值  //Mechanical median
+float Mid_Angle  = -3.43;                          						//机械中值  //Mechanical median
 float Move_X,Move_Z; //Move_X:前进速度  Move_Z：转向速度  //Move_X: Forward speed Move_Z: Steering speed
 u8 Stop_Flag = 1; //0:开始 1:停止  //0: Start 1: Stop
 u8 Balance_Run_Enabled = 0; //0:未进入运行态 1:允许运行平衡环  //0: not armed 1: balance loop may run
@@ -40,6 +40,14 @@ typedef enum
 	SYS_FAULT_RECOVERY,
 	SYS_SHUTDOWN_WAIT
 } System_Run_State;
+
+typedef enum
+{
+	WAIT_START_SCREEN_NONE = 0,
+	WAIT_START_SCREEN_LOCAL_READY,
+	WAIT_START_SCREEN_PI_WAIT,
+	WAIT_START_SCREEN_PI_READY
+} Wait_Start_Screen;
 
 static uint8_t Mode_RequiresPi(Car_Mode current_mode)
 {
@@ -61,11 +69,24 @@ static void Show_Wait_Start_State(void)
 	OLED_Draw_Line("hold key to shutdn", 3, false, true);
 }
 
+static void Show_Pi_Ready_Start_State(void)
+{
+	OLED_Draw_Line("Pi system ready   ", 1, true, false);
+	Show_Wait_Start_State();
+}
+
 static void Show_Shutdown_State(void)
 {
 	OLED_Draw_Line("shutdown request  ", 2, false, false);
 	OLED_Draw_Line("wait pi poweroff  ", 3, false, false);
 	OLED_Draw_Line("safe poweroff soon", 4, false, true);
+}
+
+static void Wait_Key1_Release(void)
+{
+	while (Key1_State(KEY_MODE_ALWAYS) == KEY_PRESS)
+	{
+	}
 }
 
 static void Restore_Normal_Mode_Safe(void)
@@ -111,6 +132,7 @@ static void Show_Fault_Recovery_State(void)
 int main(void)
 {	
 	System_Run_State system_state = SYS_MODE_SELECT;
+	Wait_Start_Screen wait_start_screen = WAIT_START_SCREEN_NONE;
 
 	bsp_init();//基本外设初始化 //Basic peripheral initialization
 	MPU6050_EXTI_Init();		//此中断服务函数放到最后  //This interrupt service function is placed last
@@ -136,9 +158,10 @@ int main(void)
 			Move_X = 0;
 			Move_Z = 0;
 			PI_Comm_SendEventCode(0x11);
+			wait_start_screen = WAIT_START_SCREEN_NONE;
 			Mode_select();
+			Wait_Key1_Release();
 			bsp_mode_init();
-			Show_Wait_Start_State();
 			system_state = SYS_WAIT_START;
 			continue;
 		}
@@ -146,25 +169,46 @@ int main(void)
 		if(system_state == SYS_WAIT_START)
 		{
 			Balance_Run_Enabled = 0;
-			Show_Pi_Init_State();
-			Show_Wait_Start_State();
-			if(Mode_RequiresPi(mode) && !PI_Comm_IsSystemReady())
+			if(Mode_RequiresPi(mode))
 			{
-				OLED_Draw_Line("vision waits for pi", 1, true, false);
-				OLED_Draw_Line("PI/LIDAR not ready ", 2, false, false);
-				OLED_Draw_Line("key: reselect mode ", 3, false, true);
-				if(Key1_State(1))
+				if(!PI_Comm_IsSystemReady())
 				{
-					system_state = SYS_MODE_SELECT;
+					if(wait_start_screen != WAIT_START_SCREEN_PI_WAIT)
+					{
+						Show_Pi_Init_State();
+						OLED_Draw_Line("vision waits for pi", 1, true, false);
+						OLED_Draw_Line("PI/LIDAR not ready ", 2, false, false);
+						OLED_Draw_Line("key: reselect mode ", 3, false, true);
+						wait_start_screen = WAIT_START_SCREEN_PI_WAIT;
+					}
+					if(Key1_State(KEY_MODE_ALWAYS))
+					{
+						wait_start_screen = WAIT_START_SCREEN_NONE;
+						system_state = SYS_MODE_SELECT;
+					}
+					continue;
 				}
-				continue;
+				if(wait_start_screen != WAIT_START_SCREEN_PI_READY)
+				{
+					Show_Pi_Ready_Start_State();
+					wait_start_screen = WAIT_START_SCREEN_PI_READY;
+				}
 			}
-			if(Key1_State(1))
+			else
+			{
+				if(wait_start_screen != WAIT_START_SCREEN_LOCAL_READY)
+				{
+					Show_Wait_Start_State();
+					wait_start_screen = WAIT_START_SCREEN_LOCAL_READY;
+				}
+			}
+			if(Key1_State(KEY_MODE_ALWAYS))
 			{
 				Balance_Run_Enabled = 1;
 				Stop_Flag = 0;
 				PI_Comm_SendEventCode(0x10);
 				OLED_Draw_Line("running...         ", 2, false, true);
+				wait_start_screen = WAIT_START_SCREEN_NONE;
 				system_state = SYS_RUNNING;
 			}
 			continue;
@@ -173,10 +217,10 @@ int main(void)
 		if(system_state == SYS_FAULT_RECOVERY)
 		{
 			Balance_Run_Enabled = 0;
+			wait_start_screen = WAIT_START_SCREEN_NONE;
 			Show_Fault_Recovery_State();
 			if(PI_Comm_IsSystemReady())
 			{
-				Show_Wait_Start_State();
 				system_state = SYS_WAIT_START;
 			}
 			continue;
@@ -185,6 +229,7 @@ int main(void)
 		if(system_state == SYS_SHUTDOWN_WAIT)
 		{
 			Balance_Run_Enabled = 0;
+			wait_start_screen = WAIT_START_SCREEN_NONE;
 			Show_Shutdown_State();
 			if(PI_Comm_GetHostStateFlags() & 0x08)
 			{
@@ -200,6 +245,7 @@ int main(void)
 			Stop_Flag = 1;
 			Move_X = 0;
 			Move_Z = 0;
+			wait_start_screen = WAIT_START_SCREEN_NONE;
 			system_state = SYS_MODE_SELECT;
 			continue;
 		}

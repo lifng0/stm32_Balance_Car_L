@@ -1,72 +1,174 @@
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
-import json
+
+from .controller_adapter import BackendControllerAdapter
+from .lidar_utils import clamp, decode_json_message, is_system_permitted, sector_distance
+
+MODE_LIDAR_AVOID = 7
+
 
 class LidarAvoidNode(Node):
-    def __init__(self):
-        super().__init__('lidar_avoid_node')
+    def __init__(self) -> None:
+        super().__init__("lidar_avoid_node")
+        self.declare_parameter("backend_host", "127.0.0.1")
+        self.declare_parameter("backend_port", 8765)
+        self.declare_parameter("cruise_speed", 8.0)
+        self.declare_parameter("slow_speed", 5.0)
+        self.declare_parameter("wall_follow_speed", 4.5)
+        self.declare_parameter("turn_speed", 8.0)
+        self.declare_parameter("warning_distance", 0.90)
+        self.declare_parameter("stop_distance", 0.42)
+        self.declare_parameter("wall_detect_distance", 0.70)
+        self.declare_parameter("wall_target_distance", 0.38)
+        self.declare_parameter("wall_exit_front_distance", 0.95)
+        self.declare_parameter("steer_gain", 11.0)
+        self.declare_parameter("wall_gain", 16.0)
 
-        # 严格对齐接口文档 7.2 节的避障核心参数，完全满足你“高于雷达高度才处理”的平面逻辑
-        self.warning_distance = 0.80       # 开始预警减速的距离（0.8米）
-        self.stop_distance = 0.45          # 触发紧急刹车的危险红线（0.45米）
-        
-        # 调试期模拟的底盘控制档位速度
-        self.forward_speed = 8.0           # 正常前进
-        self.slow_speed = 4.0              # 减速前进
-        self.turn_speed = 8.0              # 原地转身速度
-
-        # 订阅队友写好的雷达服务发布的唯一 JSON 摘要话题
-        self.subscription = self.create_subscription(
-            String,
-            '/lidar/summary_json',
-            self.lidar_callback,
-            10
+        self.adapter = BackendControllerAdapter(
+            self.get_parameter("backend_host").get_parameter_value().string_value,
+            self.get_parameter("backend_port").get_parameter_value().integer_value,
         )
-        self.get_logger().info("🚀 [避障大脑已就绪] 正在全神贯注监听 /lidar/summary_json 的变化...")
+        self.cruise_speed = self.get_parameter("cruise_speed").get_parameter_value().double_value
+        self.slow_speed = self.get_parameter("slow_speed").get_parameter_value().double_value
+        self.wall_follow_speed = self.get_parameter("wall_follow_speed").get_parameter_value().double_value
+        self.turn_speed = self.get_parameter("turn_speed").get_parameter_value().double_value
+        self.warning_distance = self.get_parameter("warning_distance").get_parameter_value().double_value
+        self.stop_distance = self.get_parameter("stop_distance").get_parameter_value().double_value
+        self.wall_detect_distance = self.get_parameter("wall_detect_distance").get_parameter_value().double_value
+        self.wall_target_distance = self.get_parameter("wall_target_distance").get_parameter_value().double_value
+        self.wall_exit_front_distance = self.get_parameter("wall_exit_front_distance").get_parameter_value().double_value
+        self.steer_gain = self.get_parameter("steer_gain").get_parameter_value().double_value
+        self.wall_gain = self.get_parameter("wall_gain").get_parameter_value().double_value
 
-    def lidar_callback(self, msg):
-        """核心决策流：减速 -> 刹车 -> 换向"""
+        self.system_state = {}
+        self.car_state = {}
+        self.last_command = None
+        self.behavior_state = "cruise"
+        self.follow_wall_side = ""
+
+        self.create_subscription(String, "/car/system_state_json", self.on_system_state, 10)
+        self.create_subscription(String, "/car/state_json", self.on_car_state, 10)
+        self.create_subscription(LaserScan, "/scan", self.on_scan, 10)
+
+    def on_system_state(self, msg: String) -> None:
+        self.system_state = decode_json_message(msg.data)
+
+    def on_car_state(self, msg: String) -> None:
+        self.car_state = decode_json_message(msg.data)
+
+    def mode_permitted(self) -> bool:
+        return int(self.car_state.get("mode", -1) or -1) == MODE_LIDAR_AVOID
+
+    def on_scan(self, scan_msg: LaserScan) -> None:
+        if not self.mode_permitted():
+            self.behavior_state = "cruise"
+            self.follow_wall_side = ""
+            self.issue_stop("mode_not_lidar_avoid")
+            return
+        if not is_system_permitted(self.system_state):
+            self.issue_stop("system_not_ready")
+            return
+
+        front = sector_distance(scan_msg, -18.0, 18.0, percentile=0.20)
+        front_wide = sector_distance(scan_msg, -35.0, 35.0, percentile=0.20)
+        left_front = sector_distance(scan_msg, 20.0, 65.0, percentile=0.20)
+        right_front = sector_distance(scan_msg, -65.0, -20.0, percentile=0.20)
+        left_side = sector_distance(scan_msg, 70.0, 110.0, percentile=0.25)
+        right_side = sector_distance(scan_msg, -110.0, -70.0, percentile=0.25)
+
+        front = front if front is not None else 9.9
+        front_wide = front_wide if front_wide is not None else front
+        left_front = left_front if left_front is not None else 9.9
+        right_front = right_front if right_front is not None else 9.9
+        left_side = left_side if left_side is not None else 9.9
+        right_side = right_side if right_side is not None else 9.9
+
+        if self.behavior_state.startswith("wall_follow"):
+            self.follow_wall(scan_msg, front, front_wide, left_front, right_front, left_side, right_side)
+            return
+
+        if front <= self.stop_distance:
+            turn_right = right_front > left_front
+            self.behavior_state = "wall_follow_left" if turn_right else "wall_follow_right"
+            self.follow_wall_side = "left" if turn_right else "right"
+            move_z = -self.turn_speed if turn_right else self.turn_speed
+            self.issue_move(0.0, move_z, "emergency_turn")
+            return
+
+        if front <= self.warning_distance:
+            turn_right = right_front > left_front
+            follow_side = "left" if turn_right else "right"
+            self.behavior_state = f"wall_follow_{follow_side}"
+            self.follow_wall_side = follow_side
+            move_z = -self.turn_speed * 0.85 if turn_right else self.turn_speed * 0.85
+            self.issue_move(self.slow_speed * 0.5, move_z, "avoid_arc_turn")
+            return
+
+        steer_bias = clamp((right_front - left_front) * self.steer_gain, -3.0, 3.0)
+        self.behavior_state = "cruise"
+        self.follow_wall_side = ""
+        self.issue_move(self.cruise_speed, steer_bias, "cruise_clear")
+
+    def follow_wall(
+        self,
+        scan_msg: LaserScan,
+        front: float,
+        front_wide: float,
+        left_front: float,
+        right_front: float,
+        left_side: float,
+        right_side: float,
+    ) -> None:
+        follow_left = self.follow_wall_side == "left"
+        wall_side = left_side if follow_left else right_side
+        free_front_side = right_front if follow_left else left_front
+        signed = 1.0 if follow_left else -1.0
+
+        if front_wide >= self.wall_exit_front_distance and free_front_side >= self.wall_exit_front_distance:
+            self.behavior_state = "cruise"
+            self.follow_wall_side = ""
+            self.issue_move(self.cruise_speed, 0.0, "wall_exit")
+            return
+
+        if front <= self.stop_distance:
+            self.issue_move(0.0, -signed * self.turn_speed, "wall_pivot")
+            return
+
+        side_error = self.wall_target_distance - wall_side
+        front_error = self.wall_target_distance - min(front_wide, free_front_side)
+        turn_command = clamp(signed * (side_error * self.wall_gain) - signed * (front_error * self.steer_gain), -self.turn_speed, self.turn_speed)
+        forward_speed = self.wall_follow_speed if front > self.warning_distance else self.wall_follow_speed * 0.7
+        self.issue_move(forward_speed, turn_command, f"wall_follow_{self.follow_wall_side}")
+
+    def issue_move(self, move_x: float, move_z: float, reason: str) -> None:
+        command = ("move", round(move_x, 3), round(move_z, 3), reason)
+        if command == self.last_command:
+            return
         try:
-            # 1. 解包队友雷达发来的数据
-            data = json.loads(msg.data or "{}")
-            
-            # 如果雷达当前无效（比如被队友手挡住了导致死区），处于安全考虑直接静止
-            if not data.get("scan_ok", False):
-                self.get_logger().info("⏳ 雷达数据不可用或正在重启，小车保持原地待命。")
-                return
+            self.adapter.set_move(move_x, move_z)
+            self.last_command = command
+        except Exception as exc:
+            self.get_logger().warning(f"avoid command failed: {exc}")
 
-            # 2. 读取文档规定的三个方向的雷达水平面距离（单位：米）
-            front = data.get("front_min_distance_m", 10.0)
-            front_left = data.get("front_left_min_distance_m", 10.0)
-            front_right = data.get("front_right_min_distance_m", 10.0)
+    def issue_stop(self, reason: str) -> None:
+        command = ("stop", reason)
+        if command == self.last_command:
+            return
+        move_x = float(self.car_state.get("move_x", 0.0) or 0.0)
+        move_z = float(self.car_state.get("move_z", 0.0) or 0.0)
+        if abs(move_x) < 1e-3 and abs(move_z) < 1e-3:
+            self.last_command = command
+            return
+        try:
+            self.adapter.set_move(0.0, 0.0)
+            self.last_command = command
+        except Exception as exc:
+            self.get_logger().warning(f"avoid stop failed: {exc}")
 
-            # 状态控制判断：
-            # 【情况 1：正常前进】
-            if front > self.warning_distance:
-                self.get_logger().info(f"🟢 道路安全 (前方距离:{front:.2f}m) -> 执行：正常速度前进 [{self.forward_speed}]")
 
-            # 【情况 2：进入预警，缓慢蹭着走】
-            elif self.stop_distance < front <= self.warning_distance:
-                self.get_logger().info(f"🟡 接近障碍 (前方距离:{front:.2f}m) -> 执行：减速缓慢前进 [{self.slow_speed}]")
-
-            # 【情况 3：离得太近了！触发你的专属修正：先刹车，再换向！】
-            elif front <= self.stop_distance:
-                self.get_logger().warn(f"🔴 危险！前方距离({front:.2f}m)已踩红线！激活保护策略：")
-                
-                # 第一步：物理刹车（这里打印出动作，后续配合队友的脚本真正控车）
-                self.get_logger().warn("   👉 [第一步：紧急刹车]：速度强制归零 0.0，稳住重心，消除向前惯性！")
-                
-                # 第二步：比对左右两边哪边空旷，往更空的一边给转向速度
-                if front_left >= front_right:
-                    self.get_logger().info(f"   👉 [第二步：左侧较空] (左:{front_left:.2f}m >= 右:{front_right:.2f}m) -> 决定：向左原地旋转转身")
-                else:
-                    self.get_logger().info(f"   👉 [第二步：右侧较空] (右:{front_right:.2f}m > 左:{front_left:.2f}m) -> 决定：向右原地旋转转身")
-
-        except Exception as e:
-            self.get_logger().error(f"大脑决策发生非预期错误: {e}")
-
-def main(args=None):
+def main(args=None) -> None:
     rclpy.init(args=args)
     node = LidarAvoidNode()
     try:
@@ -76,5 +178,6 @@ def main(args=None):
     node.destroy_node()
     rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

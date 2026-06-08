@@ -1,7 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import ExecuteProcess
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -43,11 +42,25 @@ def generate_launch_description():
                             "/balance_car_lidar_summary",
                             "/balance_car_task_manager",
                             "/balance_car_k210_parser",
+                            "/lidar_avoid_node",
                             "/lidar_follow_node",
                             "/balance_car_ros_ready",
                         ]
                     },
                 ],
+            ),
+            ExecuteProcess(
+                cmd=[
+                    "/workspaces/balance_car/ws/install/balance_car_navigation/lib/balance_car_navigation/lidar_avoid_node",
+                    "--ros-args",
+                    "-r",
+                    "__node:=lidar_avoid_node",
+                    "-p",
+                    "backend_host:=127.0.0.1",
+                    "-p",
+                    "backend_port:=8765",
+                ],
+                output="screen",
             ),
             ExecuteProcess(
                 cmd=[

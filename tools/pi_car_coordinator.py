@@ -28,7 +28,7 @@ from pi_serial_bridge import (
     build_frame,
     open_port,
 )
-from tminiplus_bridge import build_laser, detect_port, load_sdk, resolve_sdk_root, summarize_scan
+from tminiplus_bridge import build_laser, detect_port, load_sdk, resolve_sdk_root, scan_to_laserscan_dict, summarize_scan
 
 
 HOST_STATE_PI_READY = 0x01
@@ -148,6 +148,7 @@ class HostLidarWorker:
         self._scan = None
         self._port = ""
         self._summary: dict | None = None
+        self._scan_data: dict | None = None
         self._last_error = ""
         self._motor_hold_serial: serial.Serial | None = None
 
@@ -176,6 +177,7 @@ class HostLidarWorker:
             self._enabled = enabled
             if not enabled:
                 self._summary = None
+                self._scan_data = None
                 self._last_error = ""
                 self._ready_event.clear()
         if not enabled:
@@ -185,11 +187,12 @@ class HostLidarWorker:
         with self._lock:
             return self._enabled
 
-    def snapshot(self) -> tuple[str, dict | None, bool, bool]:
+    def snapshot(self) -> tuple[str, dict | None, dict | None, bool, bool]:
         with self._lock:
             return (
                 self._port,
                 None if self._summary is None else dict(self._summary),
+                None if self._scan_data is None else dict(self._scan_data),
                 self._enabled,
                 self._ready_event.is_set(),
             )
@@ -267,6 +270,7 @@ class HostLidarWorker:
         if clear_summary:
             with self._lock:
                 self._summary = None
+                self._scan_data = None
         if laser is not None:
             try:
                 laser.turnOff()
@@ -314,8 +318,10 @@ class HostLidarWorker:
                     continue
 
                 summary = summarize_scan(self._scan)
+                scan_data = scan_to_laserscan_dict(self._scan)
                 with self._lock:
                     self._summary = summary
+                    self._scan_data = scan_data
                 self._set_error("")
                 self._ready_event.set()
                 warned_scan_failure = False
@@ -580,6 +586,7 @@ class HostK210Worker:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._stop_remote_activity()
         self._close_serial()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
@@ -835,6 +842,7 @@ class STM32Coordinator:
         self.event_counter = 0
         self.lidar_port = ""
         self.lidar_summary: dict | None = None
+        self.lidar_scan: dict | None = None
         self.vision_state: dict | None = None
         self.k210_port = ""
         self.k210_ready = False
@@ -861,13 +869,50 @@ class STM32Coordinator:
         self.backend_server: CoordinatorBackendServer | None = None
         self.backend_thread: threading.Thread | None = None
 
+    def enter_stm32_disconnected_safe_state(self, reason: str = "") -> None:
+        reason_text = reason.strip() or "stm32_disconnected"
+        log(f"enter safe standby: {reason_text}")
+        with self.state_lock:
+            self.system_mode = "stm32_disconnected"
+            self.paused_by_pickup = False
+            self.current_status = None
+            self.lidar_required = False
+            self.lidar_enabled = False
+            self.lidar_summary = None
+            self.lidar_scan = None
+            self.k210_ready = False
+            self.k210_last_error = reason_text
+            self.vision_state = None
+            self.host_state = HOST_STATE_PI_READY
+        self.last_lidar_demand_at = 0.0
+        if self.k210_worker is not None:
+            self.k210_worker.set_enabled(False)
+            _, _, k210_ready, k210_last_error, k210_last_rx_at = self.k210_worker.snapshot()
+            with self.state_lock:
+                self.k210_ready = k210_ready
+                self.k210_last_error = k210_last_error or reason_text
+                self.k210_last_rx_at = k210_last_rx_at
+        if self.lidar_worker is not None:
+            self.lidar_worker.set_enabled(False)
+            lidar_port, lidar_summary, lidar_scan, lidar_enabled, _ = self.lidar_worker.snapshot()
+            with self.state_lock:
+                if lidar_port:
+                    self.lidar_port = lidar_port
+                self.lidar_enabled = lidar_enabled
+                self.lidar_summary = lidar_summary
+                self.lidar_scan = lidar_scan
+
     def close(self) -> None:
         self.stop_backend_server()
+        self.enter_stm32_disconnected_safe_state("service_stopping")
         if self.k210_worker is not None:
             self.k210_worker.stop()
         if self.lidar_worker is not None:
             self.lidar_worker.stop()
-        self.serial.close()
+        try:
+            self.serial.close()
+        except Exception:
+            pass
 
     def start_backend_server(self) -> None:
         if self.backend_server is not None:
@@ -1202,10 +1247,11 @@ class STM32Coordinator:
             if desired_enabled != previous_enabled:
                 log(f"lidar {'enable' if desired_enabled else 'disable'} by mode={mode_id} system_mode={self.system_mode}")
             self.lidar_worker.set_enabled(desired_enabled)
-            _, lidar_summary, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
+            _, lidar_summary, lidar_scan, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
             with self.state_lock:
                 self.lidar_enabled = lidar_enabled
                 self.lidar_summary = lidar_summary
+                self.lidar_scan = lidar_scan
                 lidar_bit = HOST_STATE_LIDAR_READY if lidar_ready else 0
                 system_ready = self.compute_system_ready(lidar_ready)
                 self.host_state = HOST_STATE_PI_READY | lidar_bit | (HOST_STATE_SYSTEM_READY if system_ready else 0)
@@ -1290,12 +1336,13 @@ class STM32Coordinator:
     def snapshot_state(self) -> dict:
         self.refresh_k210_state()
         if self.lidar_worker is not None:
-            lidar_port, lidar_summary, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
+            lidar_port, lidar_summary, lidar_scan, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
             with self.state_lock:
                 self.refresh_ros_ready()
                 self.lidar_port = lidar_port or self.lidar_port
                 self.lidar_enabled = lidar_enabled
                 self.lidar_summary = lidar_summary
+                self.lidar_scan = lidar_scan
                 if lidar_ready:
                     self.host_state |= HOST_STATE_LIDAR_READY
                 else:
@@ -1337,6 +1384,7 @@ class STM32Coordinator:
                 "ros_nodes": self.last_ros_nodes,
                 "ros_required_nodes": self.last_ros_required_nodes,
                 "lidar_summary": self.lidar_summary,
+                "lidar_scan": self.lidar_scan,
                 "vision_state": self.vision_state,
                 "car_state": self.current_status,
                 "control_state": self.last_control_state,
@@ -1354,6 +1402,18 @@ class STM32Coordinator:
 
         if command == "get_state":
             return self.snapshot_state()
+
+        if command == "get_lidar_scan":
+            snapshot = self.snapshot_state()
+            return {
+                "ok": True,
+                "lidar_enabled": snapshot.get("lidar_enabled", False),
+                "lidar_ready": snapshot.get("lidar_ready", False),
+                "lidar_port": snapshot.get("lidar_port", ""),
+                "lidar_summary": snapshot.get("lidar_summary"),
+                "lidar_scan": snapshot.get("lidar_scan"),
+                "timestamp": snapshot.get("timestamp", time.time()),
+            }
 
         if command == "get_vision":
             self.refresh_k210_state()
@@ -1479,27 +1539,32 @@ class STM32Coordinator:
         self.last_heartbeat_at = time.time()
         self.last_status_refresh_at = time.time()
 
-        while not self.shutdown_started:
-            if time.time() - self.last_heartbeat_at >= self.heartbeat_interval:
-                self.heartbeat()
+        try:
+            while not self.shutdown_started:
+                if time.time() - self.last_heartbeat_at >= self.heartbeat_interval:
+                    self.heartbeat()
 
-            if time.time() - self.last_status_refresh_at >= self.status_refresh_interval:
-                self.query_status(timeout=0.2)
-                self.refresh_k210_state()
-                self.last_status_refresh_at = time.time()
-                self.refresh_lidar_state()
-                self.sync_host_state_if_needed(min_interval=1.0)
-                if self.lidar_worker is not None:
-                    lidar_port, lidar_summary, lidar_enabled, _ = self.lidar_worker.snapshot()
-                    with self.state_lock:
-                        if lidar_port:
-                            self.lidar_port = lidar_port
-                        self.lidar_enabled = lidar_enabled
-                        self.lidar_summary = lidar_summary
+                if time.time() - self.last_status_refresh_at >= self.status_refresh_interval:
+                    self.query_status(timeout=0.2)
+                    self.refresh_k210_state()
+                    self.last_status_refresh_at = time.time()
+                    self.refresh_lidar_state()
+                    self.sync_host_state_if_needed(min_interval=1.0)
+                    if self.lidar_worker is not None:
+                        lidar_port, lidar_summary, lidar_scan, lidar_enabled, _ = self.lidar_worker.snapshot()
+                        with self.state_lock:
+                            if lidar_port:
+                                self.lidar_port = lidar_port
+                            self.lidar_enabled = lidar_enabled
+                            self.lidar_summary = lidar_summary
+                            self.lidar_scan = lidar_scan
 
-            frame = self.read_once(0.05)
-            if frame:
-                self.handle_frame(frame)
+                frame = self.read_once(0.05)
+                if frame:
+                    self.handle_frame(frame)
+        except Exception as exc:
+            self.enter_stm32_disconnected_safe_state(str(exc))
+            raise
 
         return 0
 

@@ -2,7 +2,7 @@ from .backend_client import request_backend
 
 
 class BackendControllerAdapter:
-    def __init__(self, host: str, port: int, timeout: float = 0.6) -> None:
+    def __init__(self, host: str, port: int, timeout: float = 1.0) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout

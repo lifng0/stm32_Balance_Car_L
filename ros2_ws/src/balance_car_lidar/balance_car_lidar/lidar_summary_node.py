@@ -3,6 +3,7 @@ import socket
 
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
 
@@ -20,13 +21,14 @@ class LidarSummaryNode(Node):
         super().__init__("balance_car_lidar_summary")
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
-        self.declare_parameter("poll_period", 0.5)
+        self.declare_parameter("poll_period", 0.15)
 
         self.backend_host = self.get_parameter("backend_host").get_parameter_value().string_value
         self.backend_port = self.get_parameter("backend_port").get_parameter_value().integer_value
         self.poll_period = self.get_parameter("poll_period").get_parameter_value().double_value
 
         self.summary_pub = self.create_publisher(String, "/lidar/summary_json", 10)
+        self.scan_pub = self.create_publisher(LaserScan, "/scan", 10)
         self.timer = self.create_timer(self.poll_period, self.publish_summary)
         self.warned_not_ready = False
 
@@ -35,7 +37,7 @@ class LidarSummaryNode(Node):
             snapshot = request_backend(
                 self.backend_host,
                 self.backend_port,
-                {"cmd": "get_state"},
+                {"cmd": "get_lidar_scan"},
                 timeout=2.0,
             )
         except Exception as exc:
@@ -47,6 +49,7 @@ class LidarSummaryNode(Node):
             return
 
         summary = snapshot.get("lidar_summary") or {}
+        scan_data = snapshot.get("lidar_scan") or {}
         if not summary:
             if not self.warned_not_ready:
                 self.get_logger().warning("lidar summary not ready from backend yet")
@@ -58,6 +61,21 @@ class LidarSummaryNode(Node):
         msg = String()
         msg.data = json.dumps(summary, ensure_ascii=False)
         self.summary_pub.publish(msg)
+
+        if scan_data and scan_data.get("points", 0) > 0:
+            scan_msg = LaserScan()
+            scan_msg.header.stamp = self.get_clock().now().to_msg()
+            scan_msg.header.frame_id = "laser"
+            scan_msg.angle_min = float(scan_data.get("angle_min", 0.0) or 0.0)
+            scan_msg.angle_max = float(scan_data.get("angle_max", 0.0) or 0.0)
+            scan_msg.angle_increment = float(scan_data.get("angle_increment", 0.0) or 0.0)
+            scan_msg.time_increment = float(scan_data.get("time_increment", 0.0) or 0.0)
+            scan_msg.scan_time = float(scan_data.get("scan_time", 0.0) or 0.0)
+            scan_msg.range_min = float(scan_data.get("range_min", 0.05) or 0.05)
+            scan_msg.range_max = float(scan_data.get("range_max", 12.0) or 12.0)
+            scan_msg.ranges = [float("inf") if value is None else float(value) for value in scan_data.get("ranges", [])]
+            scan_msg.intensities = [float(value) for value in scan_data.get("intensities", [])]
+            self.scan_pub.publish(scan_msg)
         self.warned_not_ready = False
 
 
