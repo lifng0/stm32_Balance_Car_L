@@ -1,5 +1,41 @@
+# 模式枚举真值源 (Mode enum single source of truth)
+#
+# 本文件是「模式 ID / 模式名 / 允许的控制源」的权威定义来源。
+# 对应原厂架构对齐总方案 8.1 节的模式真值表。
+#
+# 任何模式改动必须同步以下四处,否则会出现「功能看起来正常但抢控制 / 设不进模式」:
+#   - STM32 固件      USER/myenum.h            (Car_Mode 枚举)
+#   - 协调器          tools/pi_car_coordinator.py  (MODE_NAME / SUPPORTED_MODE_IDS)
+#   - 串口桥          tools/pi_serial_bridge.py    (MODE_NAME)
+#   - 控制仲裁        ros2_ws/src/balance_car_bridge/.../control_mux_node.py (MODE_TO_SOURCES)
+#
+# 说明详见 doc/架构对齐-先决条件基线.md
+#
+# 字段:
+#   name    : 模式名,必须与固件枚举、UI 显示、MODE_NAME 完全一致
+#   sources : 该模式下 control_mux_node 允许选中的控制源(空列表外只接受这些源)
+
 modes:
-  0: Normal
-  1: Weight_M
-  3: K210_Line
-  4: K210_Follow
+  0:
+    name: Normal
+    sources: [manual]
+  1:
+    name: Weight_M
+    sources: [manual]
+  3:
+    name: K210_Line
+    sources: [vision_line]
+  4:
+    name: K210_Follow
+    sources: [vision_follow]
+  7:
+    name: Lidar_Avoid
+    sources: [lidar_avoid]
+  8:
+    name: Lidar_Follow
+    sources: [lidar_follow, lidar_track]
+
+# 已知缺口(先决条件阶段记录,需后续单独评审/改固件):
+#   - 固件 app_mode.c 的 Mode_Next/Mode_Previous 轮换与 Mode_IsSelectable 不含
+#     Lidar_Avoid(7),因此拧轮 UI 无法选中避障模式;Lidar_Avoid 只能由后端
+#     CMD_SET_MODE 设置。若希望拧轮可选避障,需改固件并重新烧录。

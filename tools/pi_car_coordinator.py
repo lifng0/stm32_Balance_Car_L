@@ -59,10 +59,14 @@ MODE_NAME = {
     8: "Lidar_Follow",
 }
 
-SUPPORTED_MODE_IDS = {0, 1, 3, 4, 8}
+# 模式真值源见 ros2_ws/src/balance_car_bringup/config/modes.yaml
+# 7=Lidar_Avoid 之前缺失,导致后端 CMD_SET_MODE 无法设入避障模式,而
+# control_mux_node / lidar_avoid_node 均按 mode==7 工作 —— 在此补齐。
+SUPPORTED_MODE_IDS = {0, 1, 3, 4, 7, 8}
 K210_VISION_MODES = {3, 4}
 LINE_MODE_ID = 3
 FOLLOW_MODE_ID = 4
+LIDAR_AVOID_MODE_ID = 7
 LIDAR_FOLLOW_MODE_ID = 8
 K210_ALWAYS_CONNECTED = True
 

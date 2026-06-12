@@ -2,16 +2,45 @@ import json
 import time
 
 import rclpy
+import yaml
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from std_msgs.msg import String
 
-MODE_TO_SOURCES = {
+# 回退真值:当 modes.yaml 不可用时使用,保证控制仲裁永不因配置缺失而失效。
+# 权威来源是 balance_car_bringup/config/modes.yaml,经 modes_config 参数传入。
+DEFAULT_MODE_TO_SOURCES = {
     3: ("vision_line",),
     4: ("vision_follow",),
     7: ("lidar_avoid",),
     8: ("lidar_follow", "lidar_track"),
 }
+
+
+def load_mode_to_sources(path: str, logger=None) -> dict:
+    """从 modes.yaml 读取「模式 ID -> 控制源」映射;任何异常都回退到默认表。"""
+    if not path:
+        return dict(DEFAULT_MODE_TO_SOURCES)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        modes = data.get("modes", {})
+        result = {}
+        for mode_id, spec in modes.items():
+            sources = (spec or {}).get("sources", []) if isinstance(spec, dict) else []
+            # 仅 manual 源的模式(Normal/Weight_M)不进仲裁表,走 manual 回退
+            non_manual = tuple(s for s in sources if s != "manual")
+            if non_manual:
+                result[int(mode_id)] = non_manual
+        if not result:
+            raise ValueError("modes.yaml produced empty source map")
+        if logger is not None:
+            logger.info(f"control_mux loaded mode sources from {path}: {result}")
+        return result
+    except Exception as exc:  # noqa: BLE001 - 配置问题必须降级而非崩溃
+        if logger is not None:
+            logger.warn(f"control_mux failed to load modes.yaml ({path}): {exc}; using defaults")
+        return dict(DEFAULT_MODE_TO_SOURCES)
 
 
 class BalanceCarControlMuxNode(Node):
@@ -30,6 +59,10 @@ class BalanceCarControlMuxNode(Node):
         self.declare_parameter("manual_linear_scale", 10.0)
         self.declare_parameter("manual_angular_scale", 10.0)
         self.declare_parameter("manual_deadband", 0.01)
+        self.declare_parameter("modes_config", "")
+
+        modes_config = self.get_parameter("modes_config").get_parameter_value().string_value
+        self.mode_to_sources = load_mode_to_sources(modes_config, self.get_logger())
 
         self.output_topic = self.get_parameter("output_topic").get_parameter_value().string_value
         self.manual_linear_scale = self.get_parameter("manual_linear_scale").get_parameter_value().double_value
@@ -129,7 +162,7 @@ class BalanceCarControlMuxNode(Node):
         if self.stop_flag:
             return "", 0.0, 0.0, "stop_flag"
 
-        configured_sources = MODE_TO_SOURCES.get(self.current_mode)
+        configured_sources = self.mode_to_sources.get(self.current_mode)
         if configured_sources:
             freshest = None
             freshest_source = ""

@@ -1,9 +1,35 @@
+# 设备路径配置真值源 (Device path single source of truth)
+#
+# 本文件是 STM32 / K210 / T-mini Plus 雷达 串口路径与波特率的权威定义来源。
+# 对应原厂架构对齐总方案 4.8 / 9.4 / 12.7 节:设备路径必须统一收敛到单一配置源,
+# 其余层(systemd service / launch / compose / 各节点)只引用,不再各自硬编码。
+#
+# 当前真值取自部署中的 tools/pi_car_coordinator.service。
+# 原则:优先 /dev/serial/by-id/* 或 /dev/serial/by-path/*,不依赖 /dev/ttyUSB* 编号。
+#
+# 说明详见 doc/架构对齐-先决条件基线.md
+
+# STM32 平衡底盘 (USART2 -> TTL转USB)
+stm32:
+  ros__parameters:
+    device: /dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0
+    baudrate: 921600
+
+# K210 视觉 (UART2 -> TTL转USB)
+k210:
+  ros__parameters:
+    device: /dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0
+    baudrate: 115200
+
+# T-mini Plus 雷达 (USB转UART转接板, CP2102)
+lidar:
+  ros__parameters:
+    device: /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+    baudrate: 230400
+    scan_frequency: 10.0
+
+# backend TCP JSON(迁移期兼容,协调器退役后删除)
 bridge:
   ros__parameters:
     backend_host: 127.0.0.1
     backend_port: 8765
-lidar:
-  ros__parameters:
-    device: ""
-    baudrate: 230400
-    scan_frequency: 10.0
