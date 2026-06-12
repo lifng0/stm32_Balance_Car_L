@@ -13,7 +13,7 @@ class RosReadyNode(Node):
             "required_nodes",
             [
                 "/balance_car_bridge",
-                "/balance_car_lidar_summary",
+                "/balance_car_lidar",
                 "/balance_car_task_manager",
                 "/balance_car_k210_parser",
                 "/balance_car_ros_ready",

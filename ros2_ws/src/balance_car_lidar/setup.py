@@ -18,6 +18,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
+            "tminiplus_node = balance_car_lidar.tminiplus_node:main",
             "lidar_summary_node = balance_car_lidar.lidar_summary_node:main",
         ],
     },

@@ -1,5 +1,6 @@
 import json
 import socket
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -8,12 +9,20 @@ from std_msgs.msg import String
 
 
 def request_backend(host: str, port: int, payload: dict, timeout: float = 0.5) -> dict:
+    message = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
     with socket.create_connection((host, port), timeout=timeout) as conn:
-        conn.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        raw = conn.recv(65535)
+        conn.sendall(message)
+        conn.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+    raw = b"".join(chunks).decode("utf-8").strip()
     if not raw:
         raise RuntimeError("backend closed connection")
-    return json.loads(raw.decode("utf-8"))
+    return json.loads(raw)
 
 
 class LidarSummaryNode(Node):
@@ -22,10 +31,12 @@ class LidarSummaryNode(Node):
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
         self.declare_parameter("poll_period", 0.15)
+        self.declare_parameter("publish_scan", False)
 
         self.backend_host = self.get_parameter("backend_host").get_parameter_value().string_value
         self.backend_port = self.get_parameter("backend_port").get_parameter_value().integer_value
         self.poll_period = self.get_parameter("poll_period").get_parameter_value().double_value
+        self.publish_scan = self.get_parameter("publish_scan").get_parameter_value().bool_value
 
         self.summary_pub = self.create_publisher(String, "/lidar/summary_json", 10)
         self.scan_pub = self.create_publisher(LaserScan, "/scan", 10)
@@ -37,8 +48,8 @@ class LidarSummaryNode(Node):
             snapshot = request_backend(
                 self.backend_host,
                 self.backend_port,
-                {"cmd": "get_lidar_scan"},
-                timeout=2.0,
+                {"cmd": "get_lidar_scan" if self.publish_scan else "get_lidar_summary"},
+                timeout=0.5,
             )
         except Exception as exc:
             self.get_logger().warning(f"backend poll failed: {exc}")
@@ -58,11 +69,12 @@ class LidarSummaryNode(Node):
 
         summary["device"] = snapshot.get("lidar_port", "")
         summary["scan_ok"] = bool(snapshot.get("lidar_ready", False))
+        summary["summary_publish_time"] = time.time()
         msg = String()
         msg.data = json.dumps(summary, ensure_ascii=False)
         self.summary_pub.publish(msg)
 
-        if scan_data and scan_data.get("points", 0) > 0:
+        if self.publish_scan and scan_data and scan_data.get("points", 0) > 0:
             scan_msg = LaserScan()
             scan_msg.header.stamp = self.get_clock().now().to_msg()
             scan_msg.header.frame_id = "laser"

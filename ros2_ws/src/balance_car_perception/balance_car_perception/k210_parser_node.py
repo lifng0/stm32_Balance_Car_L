@@ -103,7 +103,7 @@ class K210ParserNode(Node):
 
     def poll_backend(self) -> None:
         try:
-            snapshot = self.backend_request({"cmd": "get_state"}, timeout=max(self.backend_timeout, 1.5))
+            snapshot = self.backend_request({"cmd": "get_k210_link"}, timeout=max(self.backend_timeout, 1.5))
         except Exception as exc:
             self.get_logger().warning(f"backend poll failed: {exc}")
             return

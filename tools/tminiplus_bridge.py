@@ -154,6 +154,19 @@ def sector_min(points, angle_min: float, angle_max: float) -> float | None:
     return min(distances) if distances else None
 
 
+def sector_percentile(points, angle_min: float, angle_max: float, percentile: float) -> float | None:
+    distances = []
+    for angle_deg, distance_m, _ in points:
+        if angle_min <= angle_deg <= angle_max:
+            if distance_m > 0.05:
+                distances.append(distance_m)
+    if not distances:
+        return None
+    distances.sort()
+    index = int(round((len(distances) - 1) * max(0.0, min(1.0, percentile))))
+    return distances[index]
+
+
 def closest_point(points, angle_min: float = -60.0, angle_max: float = 60.0):
     valid = [
         (angle_deg, distance_m)
@@ -234,6 +247,8 @@ def summarize_scan(scan) -> dict:
         "scan_frequency_hz": round(float(scan.scanFreq), 3),
         "scan_time_s": round(float(scan.config.scan_time), 4),
         "front_min_distance_m": sector_min(points, -15.0, 15.0),
+        "front_p20_distance_m": sector_percentile(points, -15.0, 15.0, 0.20),
+        "front_median_distance_m": sector_percentile(points, -15.0, 15.0, 0.50),
         "front_left_min_distance_m": sector_min(points, 15.0, 60.0),
         "front_right_min_distance_m": sector_min(points, -60.0, -15.0),
         "closest_target_angle_deg": None if closest is None else round(closest[0], 2),

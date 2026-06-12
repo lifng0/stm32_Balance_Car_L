@@ -1,6 +1,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import ExecuteProcess
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -9,6 +11,12 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("enable_navigation", default_value="false"),
             DeclareLaunchArgument("navigation_task", default_value="avoid"),
+            DeclareLaunchArgument("use_native_lidar", default_value="true"),
+            Node(
+                package="balance_car_bridge",
+                executable="control_mux_node",
+                name="balance_car_control_mux",
+            ),
             Node(
                 package="balance_car_bridge",
                 executable="bridge_node",
@@ -17,8 +25,15 @@ def generate_launch_description():
             ),
             Node(
                 package="balance_car_lidar",
+                executable="tminiplus_node",
+                name="balance_car_lidar",
+                condition=IfCondition(LaunchConfiguration("use_native_lidar")),
+            ),
+            Node(
+                package="balance_car_lidar",
                 executable="lidar_summary_node",
-                name="balance_car_lidar_summary",
+                name="balance_car_lidar",
+                condition=UnlessCondition(LaunchConfiguration("use_native_lidar")),
             ),
             Node(
                 package="balance_car_behavior",
@@ -38,8 +53,9 @@ def generate_launch_description():
                     {"backend_host": "127.0.0.1", "backend_port": 8765},
                     {
                         "required_nodes": [
+                            "/balance_car_control_mux",
                             "/balance_car_bridge",
-                            "/balance_car_lidar_summary",
+                            "/balance_car_lidar",
                             "/balance_car_task_manager",
                             "/balance_car_k210_parser",
                             "/lidar_avoid_node",

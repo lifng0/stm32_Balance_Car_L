@@ -230,7 +230,7 @@ def next_seq(args) -> int:
 def main():
     parser = argparse.ArgumentParser(description="STM32 <-> Raspberry Pi UART bridge tool")
     parser.add_argument("--device", required=True, help="serial device path, for example /dev/serial/by-id/xxx")
-    parser.add_argument("--baudrate", type=int, default=115200)
+    parser.add_argument("--baudrate", type=int, default=921600)
     parser.add_argument("--seq", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=1.0)
 

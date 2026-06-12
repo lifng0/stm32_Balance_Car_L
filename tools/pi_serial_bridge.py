@@ -137,7 +137,20 @@ class FrameParser:
 
 
 def open_port(device: str, baudrate: int) -> serial.Serial:
-    return serial.Serial(device, baudrate=baudrate, timeout=0.1)
+    handle = serial.Serial()
+    handle.port = device
+    handle.baudrate = baudrate
+    handle.timeout = 0.1
+    handle.rtscts = False
+    handle.dsrdtr = False
+    # Keep USB-TTL control lines inactive; on some adapters DTR/RTS can reset
+    # the attached STM32 or put the link into an inconsistent state.
+    handle.dtr = False
+    handle.rts = False
+    handle.open()
+    handle.dtr = False
+    handle.rts = False
+    return handle
 
 
 def read_frames(ser: serial.Serial, timeout: float):
@@ -236,7 +249,7 @@ def next_seq(args) -> int:
 def main():
     parser = argparse.ArgumentParser(description="STM32 <-> Raspberry Pi UART bridge tool")
     parser.add_argument("--device", required=True, help="serial device path, for example /dev/serial/by-id/xxx")
-    parser.add_argument("--baudrate", type=int, default=115200)
+    parser.add_argument("--baudrate", type=int, default=921600)
     parser.add_argument("--seq", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=1.0)
 

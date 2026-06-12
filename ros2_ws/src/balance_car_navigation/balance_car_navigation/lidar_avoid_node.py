@@ -14,6 +14,7 @@ class LidarAvoidNode(Node):
         super().__init__("lidar_avoid_node")
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
+        self.declare_parameter("control_topic", "/cmd_vel/lidar_avoid")
         self.declare_parameter("cruise_speed", 8.0)
         self.declare_parameter("slow_speed", 5.0)
         self.declare_parameter("wall_follow_speed", 4.5)
@@ -27,8 +28,8 @@ class LidarAvoidNode(Node):
         self.declare_parameter("wall_gain", 16.0)
 
         self.adapter = BackendControllerAdapter(
-            self.get_parameter("backend_host").get_parameter_value().string_value,
-            self.get_parameter("backend_port").get_parameter_value().integer_value,
+            self,
+            self.get_parameter("control_topic").get_parameter_value().string_value,
         )
         self.cruise_speed = self.get_parameter("cruise_speed").get_parameter_value().double_value
         self.slow_speed = self.get_parameter("slow_speed").get_parameter_value().double_value

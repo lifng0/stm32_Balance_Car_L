@@ -41,6 +41,7 @@ BACKEND_DEFAULT_PORT = 8765
 ROS_READY_LEASE_SEC = 3.0
 
 EVENT_START_REQUEST = 0x10
+EVENT_TIMEOUT_STOP = 0x04
 EVENT_MODE_SELECT = 0x11
 EVENT_STOP_ASSERT = 0x12
 EVENT_STOP_CLEAR = 0x13
@@ -62,12 +63,13 @@ SUPPORTED_MODE_IDS = {0, 1, 3, 4, 8}
 K210_VISION_MODES = {3, 4}
 LINE_MODE_ID = 3
 FOLLOW_MODE_ID = 4
+LIDAR_FOLLOW_MODE_ID = 8
 K210_ALWAYS_CONNECTED = True
 
 DEFAULT_LIDAR_POLICY = {
     "default_enabled": False,
     "prewarm_on_mode_select": True,
-    "keep_enabled_during_pause": False,
+    "keep_enabled_during_pause": True,
     "disable_grace_period_sec": 3.0,
     "modes": {
         "0": {"name": "Normal", "lidar_enabled": False},
@@ -319,6 +321,9 @@ class HostLidarWorker:
 
                 summary = summarize_scan(self._scan)
                 scan_data = scan_to_laserscan_dict(self._scan)
+                now = time.time()
+                summary["coordinator_scan_time"] = now
+                scan_data["coordinator_scan_time"] = now
                 with self._lock:
                     self._summary = summary
                     self._scan_data = scan_data
@@ -336,34 +341,60 @@ class HostLidarWorker:
 class CoordinatorBackendServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 128
 
     def __init__(self, server_address, request_handler_class, coordinator):
         self.coordinator = coordinator
         super().__init__(server_address, request_handler_class)
 
 
-class CoordinatorBackendHandler(socketserver.StreamRequestHandler):
+class CoordinatorBackendHandler(socketserver.BaseRequestHandler):
+    max_request_bytes = 65536
+
     def handle(self) -> None:
-        raw = self.rfile.readline()
-        if not raw:
-            return
-
+        self.request.settimeout(2.0)
+        raw = bytearray()
         try:
-            request = json.loads(raw.decode("utf-8"))
-        except Exception:
-            response = {"ok": False, "error": "bad_json"}
+            while len(raw) < self.max_request_bytes:
+                chunk = self.request.recv(4096)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if b"\n" in chunk:
+                    break
+        except TimeoutError:
+            response = {"ok": False, "error": "timeout"}
         else:
+            line = bytes(raw).split(b"\n", 1)[0].strip()
+            if not line:
+                return
             try:
-                response = self.server.coordinator.handle_backend_request(request)
-            except Exception as exc:
-                response = {
-                    "ok": False,
-                    "error": "backend_exception",
-                    "message": str(exc),
-                    "type": type(exc).__name__,
-                }
+                request = json.loads(line.decode("utf-8"))
+            except Exception:
+                response = {"ok": False, "error": "bad_json"}
+            else:
+                try:
+                    response = self.server.coordinator.handle_backend_request(request)
+                except Exception as exc:
+                    response = {
+                        "ok": False,
+                        "error": "backend_exception",
+                        "message": str(exc),
+                        "type": type(exc).__name__,
+                    }
 
-        self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+        payload = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            self.request.sendall(payload)
+        finally:
+            try:
+                self.request.shutdown(2)
+            except Exception:
+                pass
+            try:
+                self.request.close()
+            except Exception:
+                pass
 
 
 def parse_status_payload(payload: bytes) -> dict:
@@ -809,6 +840,7 @@ class STM32Coordinator:
         backend_host: str,
         backend_port: int,
         lidar_policy: dict,
+        use_host_lidar: bool,
         lidar_motor_dtr_control: bool,
         lidar_motor_dtr_active_high: bool,
         lidar_motor_settle_time: float,
@@ -821,6 +853,7 @@ class STM32Coordinator:
         self.backend_host = backend_host
         self.backend_port = backend_port
         self.lidar_policy = lidar_policy
+        self.use_host_lidar = use_host_lidar
         self.lidar_motor_dtr_control = lidar_motor_dtr_control
         self.lidar_motor_dtr_active_high = lidar_motor_dtr_active_high
         self.lidar_motor_settle_time = lidar_motor_settle_time
@@ -835,7 +868,7 @@ class STM32Coordinator:
         self.paused_by_pickup = False
         self.last_heartbeat_at = 0.0
         self.last_status_refresh_at = 0.0
-        self.status_refresh_interval = 0.5
+        self.status_refresh_interval = 1.0
         self.shutdown_started = False
         self.last_event_code = 0
         self.last_event_name = "BOOT"
@@ -861,6 +894,15 @@ class STM32Coordinator:
         self.last_lidar_demand_at = 0.0
         self.last_control_state: dict | None = None
         self.control_counter = 0
+        self.last_motion_log: tuple[float, float, int, int] | None = None
+        self.motion_test_active_until = 0.0
+        self.last_lidar_follow_control_at = 0.0
+        self.last_lidar_follow_command: tuple[float, float, str] | None = None
+        self.last_lidar_follow_wait_log_at = 0.0
+        self.lidar_follow_front_history = deque(maxlen=3)
+        self.lidar_follow_motion_state = "hold"
+        self.lidar_follow_last_move_x = 0.0
+        self.enable_host_lidar_follow = False
         self.last_host_state_sync_at = 0.0
         self.last_host_state_sent: int | None = None
         self.host_state_confirmed = False
@@ -1135,17 +1177,171 @@ class STM32Coordinator:
         response["timestamp"] = time.time()
         return response
 
-    def set_move_command(self, move_x: float, move_z: float) -> dict:
+    def move_matches(self, status: dict | None, move_x: float, move_z: float, tolerance: float = 0.2) -> bool:
+        if not status:
+            return False
+        try:
+            current_x = float(status.get("move_x", 0.0) or 0.0)
+            current_z = float(status.get("move_z", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return abs(current_x - move_x) <= tolerance and abs(current_z - move_z) <= tolerance
+
+    def set_move_command(self, move_x: float, move_z: float, wait_ack: bool = False) -> dict:
         clamped_x = max(-30.0, min(30.0, float(move_x)))
-        clamped_z = max(-120.0, min(120.0, float(move_z)))
+        clamped_z = max(-450.0, min(450.0, float(move_z)))
         payload = struct.pack("<hh", int(round(clamped_x * 10.0)), int(round(clamped_z * 10.0)))
-        response = self._request_ack(CMD_SET_MOVE, payload)
-        response["move_x"] = clamped_x
-        response["move_z"] = clamped_z
-        if response.get("ok"):
-            response["car_state"] = self.query_status(timeout=0.3)
-        response["timestamp"] = time.time()
-        return response
+        if wait_ack:
+            response = self._request_ack(CMD_SET_MOVE, payload, timeout=0.8)
+            response["move_x"] = clamped_x
+            response["move_z"] = clamped_z
+            if response.get("ok"):
+                response["car_state"] = self.query_status(timeout=0.3)
+            elif response.get("error") == "timeout":
+                status = self.query_status(timeout=0.5)
+                response["car_state"] = status
+                if self.move_matches(status, clamped_x, clamped_z):
+                    response["ok"] = True
+                    response["verified_after_timeout"] = True
+                else:
+                    retry = self._request_ack(CMD_SET_MOVE, payload, timeout=0.8)
+                    response["retry"] = retry
+                    if retry.get("ok"):
+                        status = self.query_status(timeout=0.5)
+                        response["car_state"] = status
+                        response["ok"] = True
+                        response["verified_after_retry"] = self.move_matches(status, clamped_x, clamped_z)
+            response["timestamp"] = time.time()
+            response["ack_waited"] = True
+            return response
+
+        with self.serial_lock:
+            seq = self._write_frame_unlocked(CMD_SET_MOVE, payload)
+        car_state = self.current_status or {}
+        motion_snapshot = (
+            round(clamped_x, 1),
+            round(clamped_z, 1),
+            int(car_state.get("mode", -1) or -1),
+            int(car_state.get("stop_flag", 1) or 0),
+        )
+        if motion_snapshot != self.last_motion_log:
+            log(
+                "set_move tx "
+                f"x={motion_snapshot[0]:.1f} z={motion_snapshot[1]:.1f} "
+                f"mode={motion_snapshot[2]} stop={motion_snapshot[3]} seq={seq}"
+            )
+            self.last_motion_log = motion_snapshot
+        return {
+            "ok": True,
+            "cmd": CMD_SET_MOVE,
+            "seq": seq,
+            "move_x": clamped_x,
+            "move_z": clamped_z,
+            "car_state": self.current_status,
+            "timestamp": time.time(),
+            "ack_waited": False,
+        }
+
+    @staticmethod
+    def _distance_from_summary(summary: dict | None, key: str) -> float | None:
+        if not summary:
+            return None
+        try:
+            value = float(summary.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0.0 else None
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, value))
+
+    def reset_lidar_follow_controller(self) -> None:
+        self.last_lidar_follow_command = None
+        self.lidar_follow_front_history.clear()
+        self.lidar_follow_motion_state = "hold"
+        self.lidar_follow_last_move_x = 0.0
+
+    def stable_front_distance(self, summary: dict | None) -> tuple[float | None, float | None, float | None]:
+        raw_min = self._distance_from_summary(summary, "front_min_distance_m")
+        front = (
+            self._distance_from_summary(summary, "front_p20_distance_m")
+            or self._distance_from_summary(summary, "front_median_distance_m")
+            or raw_min
+        )
+        if front is None:
+            self.lidar_follow_front_history.clear()
+            return None, raw_min, None
+
+        self.lidar_follow_front_history.append(front)
+        filtered_values = sorted(self.lidar_follow_front_history)
+        filtered = filtered_values[len(filtered_values) // 2]
+        return front, raw_min, filtered
+
+    def run_lidar_follow_control(self) -> None:
+        status = self.current_status or {}
+        mode_id = int(status.get("mode", -1) or -1)
+        if mode_id != LIDAR_FOLLOW_MODE_ID:
+            self.last_lidar_follow_command = None
+            return
+        if self.system_mode != "running":
+            self.log_lidar_follow_wait(
+                f"not_running system_mode={self.system_mode} stop={status.get('stop_flag')} "
+                f"lidar_required={self.lidar_required} lidar_enabled={self.lidar_enabled} "
+                f"host_lidar_ready={bool(self.host_state & HOST_STATE_LIDAR_READY)}"
+            )
+            self.last_lidar_follow_command = None
+            return
+        if bool(status.get("stop_flag", True)):
+            self.log_lidar_follow_wait("stop_flag_asserted")
+            self.last_lidar_follow_command = None
+            return
+        if self.lidar_worker is None:
+            self.log_lidar_follow_wait("no_lidar_worker")
+            return
+
+        _, summary, _, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
+        if not lidar_enabled or not lidar_ready:
+            self.log_lidar_follow_wait(f"lidar_not_ready enabled={lidar_enabled} ready={lidar_ready}")
+            return
+
+        front = self._distance_from_summary(summary, "front_min_distance_m")
+        left = self._distance_from_summary(summary, "front_left_min_distance_m")
+        right = self._distance_from_summary(summary, "front_right_min_distance_m")
+        move_z = 0.0
+        move_x = 0.0
+        reason = "hold_position"
+        side_blocked = (left is not None and left < 0.18) or (right is not None and right < 0.18)
+        if front is not None and 0.0 < front < 0.18:
+            move_x = -15.0
+            reason = "front_too_close"
+        elif front is not None and 0.28 < front < 0.45 and not side_blocked:
+            move_x = 15.0
+            reason = "front_too_far"
+        elif side_blocked:
+            reason = "side_too_close"
+
+        now = time.time()
+        command = (move_x, move_z, reason)
+        if command == self.last_lidar_follow_command and now - self.last_lidar_follow_control_at < 0.12:
+            return
+        response = self.set_move_command(move_x, move_z, wait_ack=False)
+        self.remember_control_state(response)
+        self.last_lidar_follow_control_at = now
+        self.last_lidar_follow_command = command
+        log(
+            "auto_lidar_follow "
+            f"x={move_x:.1f} z={move_z:.1f} reason={reason} "
+            f"front={front if front is not None else -1:.3f} "
+            f"left={left if left is not None else -1:.3f} "
+            f"right={right if right is not None else -1:.3f}"
+        )
+
+    def log_lidar_follow_wait(self, reason: str) -> None:
+        now = time.time()
+        if now - self.last_lidar_follow_wait_log_at >= 1.0:
+            log(f"auto_lidar_follow_wait {reason}")
+            self.last_lidar_follow_wait_log_at = now
 
     def remember_control_state(self, response: dict) -> dict:
         control_state = {
@@ -1255,6 +1451,15 @@ class STM32Coordinator:
                 lidar_bit = HOST_STATE_LIDAR_READY if lidar_ready else 0
                 system_ready = self.compute_system_ready(lidar_ready)
                 self.host_state = HOST_STATE_PI_READY | lidar_bit | (HOST_STATE_SYSTEM_READY if system_ready else 0)
+            return
+
+        with self.state_lock:
+            self.lidar_enabled = False
+            self.lidar_summary = None
+            self.lidar_scan = None
+            self.lidar_port = ""
+            system_ready = self.compute_system_ready(True)
+            self.host_state = HOST_STATE_PI_READY | (HOST_STATE_SYSTEM_READY if system_ready else 0)
 
     def heartbeat(self) -> None:
         seq = self.write_frame(CMD_HEARTBEAT)
@@ -1282,10 +1487,17 @@ class STM32Coordinator:
     def handle_event(self, event_code: int) -> None:
         event_name = EVENT_NAME.get(event_code, f"0x{event_code:02X}")
         with self.state_lock:
+            previous_event_code = self.last_event_code
             self.last_event_code = event_code
             self.last_event_name = event_name
             self.event_counter += 1
         log(f"event={event_name}")
+
+        if event_code == EVENT_TIMEOUT_STOP:
+            self.paused_by_pickup = False
+            self.refresh_lidar_state()
+            log("heartbeat timeout stop; keep lidar warm")
+            return
 
         if event_code == EVENT_START_REQUEST:
             self.system_mode = "running"
@@ -1307,9 +1519,14 @@ class STM32Coordinator:
             return
 
         if event_code == EVENT_STOP_ASSERT:
+            if previous_event_code == EVENT_TIMEOUT_STOP:
+                self.paused_by_pickup = False
+                self.refresh_lidar_state()
+                log("stop asserted after timeout; keep lidar warm")
+                return
             self.paused_by_pickup = True
             self.refresh_lidar_state()
-            log("pause by pickup")
+            log("pause by stop assert")
             return
 
         if event_code == EVENT_STOP_CLEAR:
@@ -1333,26 +1550,14 @@ class STM32Coordinator:
         time.sleep(1.0)
         subprocess.run(["sudo", "poweroff"], check=False)
 
-    def snapshot_state(self) -> dict:
-        self.refresh_k210_state()
-        if self.lidar_worker is not None:
-            lidar_port, lidar_summary, lidar_scan, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
-            with self.state_lock:
-                self.refresh_ros_ready()
-                self.lidar_port = lidar_port or self.lidar_port
-                self.lidar_enabled = lidar_enabled
-                self.lidar_summary = lidar_summary
-                self.lidar_scan = lidar_scan
-                if lidar_ready:
-                    self.host_state |= HOST_STATE_LIDAR_READY
-                else:
-                    self.host_state &= ~HOST_STATE_LIDAR_READY
-                if self.compute_system_ready(lidar_ready):
-                    self.host_state |= HOST_STATE_SYSTEM_READY
-                else:
-                    self.host_state &= ~HOST_STATE_SYSTEM_READY
+    def _cached_state_snapshot(self, include_lidar_scan: bool = False) -> dict:
         with self.state_lock:
-            car_state = self.current_status or {}
+            self.refresh_ros_ready()
+            car_state = None if self.current_status is None else dict(self.current_status)
+            vision_state = None if self.vision_state is None else dict(self.vision_state)
+            lidar_summary = None if self.lidar_summary is None else dict(self.lidar_summary)
+            lidar_scan = None if self.lidar_scan is None else dict(self.lidar_scan)
+            control_state = None if self.last_control_state is None else dict(self.last_control_state)
             return {
                 "ok": True,
                 "backend_host": self.backend_host,
@@ -1365,7 +1570,7 @@ class STM32Coordinator:
                 "shutdown_ack": bool(self.host_state & HOST_STATE_SHUTDOWN_ACK),
                 "paused_by_pickup": self.paused_by_pickup,
                 "shutdown_started": self.shutdown_started,
-                "stop_flag": bool(car_state.get("stop_flag", True)),
+                "stop_flag": bool((car_state or {}).get("stop_flag", True)),
                 "last_event_code": self.last_event_code,
                 "last_event_name": self.last_event_name,
                 "event_counter": self.event_counter,
@@ -1381,18 +1586,21 @@ class STM32Coordinator:
                 "ros_ready": self.ros_ready,
                 "ros_ready_reason": self.ros_ready_reason,
                 "last_ros_ready_at": self.last_ros_ready_at,
-                "ros_nodes": self.last_ros_nodes,
-                "ros_required_nodes": self.last_ros_required_nodes,
-                "lidar_summary": self.lidar_summary,
-                "lidar_scan": self.lidar_scan,
-                "vision_state": self.vision_state,
-                "car_state": self.current_status,
-                "control_state": self.last_control_state,
+                "ros_nodes": list(self.last_ros_nodes),
+                "ros_required_nodes": list(self.last_ros_required_nodes),
+                "lidar_summary": lidar_summary,
+                "lidar_scan": lidar_scan if include_lidar_scan else None,
+                "vision_state": vision_state,
+                "car_state": car_state,
+                "control_state": control_state,
                 "control_counter": self.control_counter,
                 "host_state_supported": self.host_state_supported,
                 "control_backend_ready": True,
                 "timestamp": time.time(),
             }
+
+    def snapshot_state(self, include_lidar_scan: bool = False) -> dict:
+        return self._cached_state_snapshot(include_lidar_scan=include_lidar_scan)
 
     def handle_backend_request(self, request: dict) -> dict:
         command = request.get("cmd", "get_state")
@@ -1403,8 +1611,40 @@ class STM32Coordinator:
         if command == "get_state":
             return self.snapshot_state()
 
+        if command == "begin_motion_test":
+            duration = max(1.0, min(60.0, float(request.get("duration_sec", 20.0) or 20.0)))
+            self.motion_test_active_until = time.time() + duration
+            log(f"motion test lock enabled duration={duration:.1f}s")
+            return {
+                "ok": True,
+                "cmd": command,
+                "duration_sec": duration,
+                "active_until": self.motion_test_active_until,
+                "timestamp": time.time(),
+            }
+
+        if command == "end_motion_test":
+            self.motion_test_active_until = 0.0
+            log("motion test lock disabled")
+            return {"ok": True, "cmd": command, "timestamp": time.time()}
+
         if command == "get_lidar_scan":
-            snapshot = self.snapshot_state()
+            if self.lidar_worker is not None:
+                lidar_port, lidar_summary, lidar_scan, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
+                with self.state_lock:
+                    self.lidar_port = lidar_port or self.lidar_port
+                    self.lidar_enabled = lidar_enabled
+                    self.lidar_summary = lidar_summary
+                    self.lidar_scan = lidar_scan
+                    if lidar_ready:
+                        self.host_state |= HOST_STATE_LIDAR_READY
+                    else:
+                        self.host_state &= ~HOST_STATE_LIDAR_READY
+                    if self.compute_system_ready(lidar_ready):
+                        self.host_state |= HOST_STATE_SYSTEM_READY
+                    else:
+                        self.host_state &= ~HOST_STATE_SYSTEM_READY
+            snapshot = self.snapshot_state(include_lidar_scan=True)
             return {
                 "ok": True,
                 "lidar_enabled": snapshot.get("lidar_enabled", False),
@@ -1412,6 +1652,31 @@ class STM32Coordinator:
                 "lidar_port": snapshot.get("lidar_port", ""),
                 "lidar_summary": snapshot.get("lidar_summary"),
                 "lidar_scan": snapshot.get("lidar_scan"),
+                "timestamp": snapshot.get("timestamp", time.time()),
+            }
+
+        if command == "get_lidar_summary":
+            if self.lidar_worker is not None:
+                lidar_port, lidar_summary, _, lidar_enabled, lidar_ready = self.lidar_worker.snapshot()
+                with self.state_lock:
+                    self.lidar_port = lidar_port or self.lidar_port
+                    self.lidar_enabled = lidar_enabled
+                    self.lidar_summary = lidar_summary
+                    if lidar_ready:
+                        self.host_state |= HOST_STATE_LIDAR_READY
+                    else:
+                        self.host_state &= ~HOST_STATE_LIDAR_READY
+                    if self.compute_system_ready(lidar_ready):
+                        self.host_state |= HOST_STATE_SYSTEM_READY
+                    else:
+                        self.host_state &= ~HOST_STATE_SYSTEM_READY
+            snapshot = self.snapshot_state(include_lidar_scan=False)
+            return {
+                "ok": True,
+                "lidar_enabled": snapshot.get("lidar_enabled", False),
+                "lidar_ready": snapshot.get("lidar_ready", False),
+                "lidar_port": snapshot.get("lidar_port", ""),
+                "lidar_summary": snapshot.get("lidar_summary"),
                 "timestamp": snapshot.get("timestamp", time.time()),
             }
 
@@ -1473,6 +1738,29 @@ class STM32Coordinator:
                 move_z = float(request.get("move_z", 0.0))
             except (TypeError, ValueError):
                 return {"ok": False, "error": "bad_value", "cmd": command}
+            wait_ack = bool(request.get("wait_ack", False))
+            source = str(request.get("source", "") or "")
+            if time.time() < self.motion_test_active_until and source != "motion_smoke_test":
+                return {
+                    "ok": True,
+                    "cmd": command,
+                    "move_x": move_x,
+                    "move_z": move_z,
+                    "car_state": self.current_status,
+                    "timestamp": time.time(),
+                    "ignored_by_motion_test": True,
+                }
+            mode_id = int((self.current_status or {}).get("mode", -1) or -1)
+            if self.enable_host_lidar_follow and self.system_mode == "running" and mode_id == LIDAR_FOLLOW_MODE_ID and source != "motion_smoke_test":
+                return {
+                    "ok": True,
+                    "cmd": command,
+                    "move_x": move_x,
+                    "move_z": move_z,
+                    "car_state": self.current_status,
+                    "timestamp": time.time(),
+                    "ignored_by_auto_lidar_follow": True,
+                }
             permitted, reason = self.motion_control_permitted()
             if not permitted:
                 return {
@@ -1482,7 +1770,7 @@ class STM32Coordinator:
                     "message": f"motion command rejected: {reason}",
                     "timestamp": time.time(),
                 }
-            return self.remember_control_state(self.set_move_command(move_x, move_z))
+            return self.remember_control_state(self.set_move_command(move_x, move_z, wait_ack=wait_ack))
 
         if command in ("set_enable", "stop"):
             return {
@@ -1520,16 +1808,19 @@ class STM32Coordinator:
         else:
             log("reported PI_READY")
 
-        self.lidar_worker = HostLidarWorker(
-            sdk_root=sdk_root,
-            preferred_device=lidar_device,
-            baudrate=lidar_baudrate,
-            scan_frequency=scan_frequency,
-            motor_dtr_control=self.lidar_motor_dtr_control,
-            motor_dtr_active_high=self.lidar_motor_dtr_active_high,
-            motor_settle_time=self.lidar_motor_settle_time,
-        )
-        self.lidar_worker.start()
+        if self.use_host_lidar:
+            self.lidar_worker = HostLidarWorker(
+                sdk_root=sdk_root,
+                preferred_device=lidar_device,
+                baudrate=lidar_baudrate,
+                scan_frequency=scan_frequency,
+                motor_dtr_control=self.lidar_motor_dtr_control,
+                motor_dtr_active_high=self.lidar_motor_dtr_active_high,
+                motor_settle_time=self.lidar_motor_settle_time,
+            )
+            self.lidar_worker.start()
+        else:
+            log("host lidar worker disabled; lidar ownership moved to ROS native node")
         self.system_mode = "mode_select"
         self.query_status(timeout=1.0)
         self.refresh_k210_state()
@@ -1562,6 +1853,8 @@ class STM32Coordinator:
                 frame = self.read_once(0.05)
                 if frame:
                     self.handle_frame(frame)
+                if self.enable_host_lidar_follow:
+                    self.run_lidar_follow_control()
         except Exception as exc:
             self.enter_stm32_disconnected_safe_state(str(exc))
             raise
@@ -1630,8 +1923,8 @@ def detect_k210_port(preferred: str | None) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Raspberry Pi coordinator for STM32 balance car")
     parser.add_argument("--stm32-device", default=None, help="STM32 serial device path, auto-detect if omitted")
-    parser.add_argument("--stm32-baudrate", type=int, default=115200)
-    parser.add_argument("--heartbeat-interval", type=float, default=0.1)
+    parser.add_argument("--stm32-baudrate", type=int, default=921600)
+    parser.add_argument("--heartbeat-interval", type=float, default=0.25)
     parser.add_argument("--k210-device", default=None, help="K210 serial device path, auto-detect if omitted")
     parser.add_argument("--k210-baudrate", type=int, default=115200)
     parser.add_argument("--lidar-device", default=None, help="Lidar serial device path, auto-detect if omitted")
@@ -1641,6 +1934,7 @@ def main() -> int:
     parser.add_argument("--backend-port", type=int, default=BACKEND_DEFAULT_PORT)
     parser.add_argument("--sdk-root", default=str(resolve_sdk_root()))
     parser.add_argument("--lidar-policy-config", default=str(DEFAULT_LIDAR_POLICY_PATH))
+    parser.add_argument("--host-lidar", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--lidar-motor-dtr-control", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--lidar-motor-dtr-active-high", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--lidar-motor-settle-time", type=float, default=0.2)
@@ -1659,6 +1953,7 @@ def main() -> int:
         backend_host=args.backend_host,
         backend_port=args.backend_port,
         lidar_policy=lidar_policy,
+        use_host_lidar=args.host_lidar,
         lidar_motor_dtr_control=args.lidar_motor_dtr_control,
         lidar_motor_dtr_active_high=args.lidar_motor_dtr_active_high,
         lidar_motor_settle_time=args.lidar_motor_settle_time,

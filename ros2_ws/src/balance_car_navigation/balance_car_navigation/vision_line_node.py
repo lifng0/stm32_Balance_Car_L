@@ -14,6 +14,7 @@ class VisionLineNode(Node):
         super().__init__("vision_line_node")
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
+        self.declare_parameter("control_topic", "/cmd_vel/vision_line")
         self.declare_parameter("target_center_x", 160.0)
         self.declare_parameter("forward_speed", 15.0)
         self.declare_parameter("turn_kp", 0.25)
@@ -23,8 +24,8 @@ class VisionLineNode(Node):
         self.declare_parameter("control_period_sec", 0.1)
 
         self.controller = BackendControllerAdapter(
-            self.get_parameter("backend_host").get_parameter_value().string_value,
-            self.get_parameter("backend_port").get_parameter_value().integer_value,
+            self,
+            self.get_parameter("control_topic").get_parameter_value().string_value,
         )
         self.target_center_x = self.get_parameter("target_center_x").get_parameter_value().double_value
         self.forward_speed = self.get_parameter("forward_speed").get_parameter_value().double_value

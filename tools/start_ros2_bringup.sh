@@ -44,7 +44,9 @@ if ! wait_for_backend; then
 fi
 
 log "starting ros2 container ${ROS2_CONTAINER_NAME}"
-docker compose -f compose.yaml up -d ros2-dev
+docker compose -f compose.yaml up -d --force-recreate ros2-dev
+log "resetting ros2 container ${ROS2_CONTAINER_NAME} to clear stale launch processes"
+docker restart "${ROS2_CONTAINER_NAME}" >/dev/null
 
 log "verifying ros2 workspace packages inside ${ROS2_CONTAINER_NAME}"
 docker exec "${ROS2_CONTAINER_NAME}" bash -lc "\

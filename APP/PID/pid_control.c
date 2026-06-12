@@ -12,18 +12,18 @@ float Turn_K = 1.0; //1.0
 
 //直立环PD控制参数
 //Vertical loop PD control parameters
-float Balance_Kp =15177;//范围0-288  Range 0-288
-float Balance_Kd =6341; //范围0-2  Range 0-2
+float Balance_Kp =19179;//范围0-288  Range 0-288
+float Balance_Kd =8639; //范围0-2  Range 0-2
 
 //速度环PI控制参数
 //PI control parameters for speed loop
-float Velocity_Kp=10270; //范围0-72 6000  Range 0-72 6000
-float Velocity_Ki=2287;  //kp/200  30
+float Velocity_Kp=10500; //范围0-72 6000  Range 0-72 6000
+float Velocity_Ki=4639;  //kp/200  30
 
 //转向环PD控制参数
 //Steering ring PD control parameters
-float Turn_Kp=1700; //这个根据自 己的需求调，只是平衡可以不调,和旋转速度有关 This can be adjusted according to one's own needs, but the balance can be left unadjusted, depending on the rotation speed
-float Turn_Kd=2000; //范围 0-2  Range 0-2
+float Turn_Kp=2417; //这个根据自 己的需求调，只是平衡可以不调,和旋转速度有关 This can be adjusted according to one's own needs, but the balance can be left unadjusted, depending on the rotation speed
+float Turn_Kd=3139; //范围 0-2  Range 0-2
 
 //前进速度
 //Forward speed

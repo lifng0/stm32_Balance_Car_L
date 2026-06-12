@@ -157,7 +157,16 @@ void Set_angle(void)
 extern float Balance_Kp,Balance_Kd,Velocity_Kp,Velocity_Ki,Turn_Kp,Turn_Kd; //引入立直环、速度环、转向环 //Introduce vertical rings, speed rings, and steering rings
 void Set_PID(void)
 {
-	if(mode == Weight_M || mode == K210_Follow || mode == Lidar_Follow) //负重 / 自动追踪 Load bearing / autonomous follow
+	if(mode == Lidar_Follow)
+	{
+		Balance_Kp =10200;
+		Balance_Kd =85;
+		Velocity_Kp=9000;
+		Velocity_Ki=45;
+		Turn_Kp=2500;
+		Turn_Kd=20;
+	}
+	else if(mode == Weight_M || mode == K210_Follow) //负重 / 自动追踪 Load bearing / autonomous follow
 	{
 		
 		Balance_Kp =9600;

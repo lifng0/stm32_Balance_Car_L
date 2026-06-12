@@ -4,7 +4,7 @@
 #define PI_COMM_SOF2                 0x55
 #define PI_COMM_VERSION              0x01
 #define PI_COMM_MAX_PAYLOAD          32
-#define PI_COMM_HEARTBEAT_TIMEOUT    50
+#define PI_COMM_HEARTBEAT_TIMEOUT    150
 
 #define PI_COMM_CMD_PING             0x01
 #define PI_COMM_CMD_SET_ENABLE       0x02
@@ -140,13 +140,13 @@ static float PI_Comm_ClampLinearMove(float value)
 
 static float PI_Comm_ClampTurnMove(float value)
 {
-	if (value > 120.0f)
+	if (value > 450.0f)
 	{
-		return 120.0f;
+		return 450.0f;
 	}
-	if (value < -120.0f)
+	if (value < -450.0f)
 	{
-		return -120.0f;
+		return -450.0f;
 	}
 	return value;
 }
@@ -256,6 +256,12 @@ static void PI_Comm_HandleFrame(uint8_t cmd, uint8_t seq, const uint8_t *payload
 {
 	float move_x_value;
 	float move_z_value;
+
+	/* Any valid protocol frame proves that the Pi link is still alive.
+	   Do not rely on HEARTBEAT alone, otherwise brief scheduling jitter on
+	   the Raspberry Pi can falsely trip the watchdog while status/host-state
+	   frames are still flowing. */
+	PI_Comm_RefreshWatchdog();
 
 	switch (cmd)
 	{

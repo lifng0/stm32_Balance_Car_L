@@ -7,6 +7,11 @@ def generate_launch_description():
         [
             Node(
                 package="balance_car_bridge",
+                executable="control_mux_node",
+                name="balance_car_control_mux",
+            ),
+            Node(
+                package="balance_car_bridge",
                 executable="bridge_node",
                 name="balance_car_bridge",
                 parameters=[{"backend_host": "127.0.0.1", "backend_port": 8765}],

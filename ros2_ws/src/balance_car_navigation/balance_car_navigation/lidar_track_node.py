@@ -11,6 +11,7 @@ class LidarTrackNode(Node):
         super().__init__("lidar_track_node")
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
+        self.declare_parameter("control_topic", "/cmd_vel/lidar_track")
         self.declare_parameter("max_detect_distance", 1.50)
         self.declare_parameter("stop_distance_insurance", 0.20)
         self.declare_parameter("distance_deadband", 0.05)
@@ -19,8 +20,8 @@ class LidarTrackNode(Node):
         self.declare_parameter("max_turn_speed", 5.0)
 
         self.adapter = BackendControllerAdapter(
-            self.get_parameter("backend_host").get_parameter_value().string_value,
-            self.get_parameter("backend_port").get_parameter_value().integer_value,
+            self,
+            self.get_parameter("control_topic").get_parameter_value().string_value,
         )
         self.max_detect_distance = self.get_parameter("max_detect_distance").get_parameter_value().double_value
         self.stop_distance_insurance = self.get_parameter("stop_distance_insurance").get_parameter_value().double_value

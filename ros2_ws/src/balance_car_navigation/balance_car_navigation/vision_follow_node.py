@@ -14,6 +14,7 @@ class VisionFollowNode(Node):
         super().__init__("vision_follow_node")
         self.declare_parameter("backend_host", "127.0.0.1")
         self.declare_parameter("backend_port", 8765)
+        self.declare_parameter("control_topic", "/cmd_vel/vision_follow")
         self.declare_parameter("cx_deadband", 25)
         self.declare_parameter("width_deadband", 8)
         self.declare_parameter("max_forward_speed", 8.0)
@@ -21,8 +22,8 @@ class VisionFollowNode(Node):
         self.declare_parameter("cx_center", 160)
 
         self.adapter = BackendControllerAdapter(
-            self.get_parameter("backend_host").get_parameter_value().string_value,
-            self.get_parameter("backend_port").get_parameter_value().integer_value,
+            self,
+            self.get_parameter("control_topic").get_parameter_value().string_value,
         )
         self.cx_deadband = self.get_parameter("cx_deadband").get_parameter_value().integer_value
         self.width_deadband = self.get_parameter("width_deadband").get_parameter_value().integer_value

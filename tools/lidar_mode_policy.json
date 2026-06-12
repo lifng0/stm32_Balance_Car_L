@@ -1,7 +1,7 @@
 {
   "default_enabled": false,
   "prewarm_on_mode_select": true,
-  "keep_enabled_during_pause": false,
+  "keep_enabled_during_pause": true,
   "disable_grace_period_sec": 3.0,
   "modes": {
     "0": {

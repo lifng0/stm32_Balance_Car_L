@@ -151,19 +151,30 @@ def choose_front_cluster(
     clusters: list[dict],
     cone_deg: float = 18.0,
     max_distance_m: float = 2.5,
+    min_width_m: float = 0.05,
+    max_width_m: float = 0.75,
+    max_depth_m: float = 0.40,
 ) -> dict | None:
     eligible = [
         cluster
         for cluster in clusters
-        if abs(cluster["centroid_angle_deg"]) <= cone_deg and cluster["centroid_distance_m"] <= max_distance_m
+        if abs(cluster["centroid_angle_deg"]) <= cone_deg
+        and cluster["centroid_distance_m"] <= max_distance_m
+        and cluster["width_m"] >= min_width_m
+        and cluster["width_m"] <= max_width_m
+        and (cluster["max_distance"] - cluster["min_distance"]) <= max_depth_m
     ]
     if not eligible:
         return None
     return min(
         eligible,
         key=lambda cluster: (
+            abs(cluster["centroid_angle_deg"]) * 2.5
+            + cluster["centroid_distance_m"] * 0.9
+            + abs(cluster["width_m"] - 0.24) * 1.4
+            + (cluster["max_distance"] - cluster["min_distance"]) * 2.0,
             abs(cluster["centroid_angle_deg"]),
-            cluster["centroid_distance_m"],
+            cluster["min_distance"],
             -cluster["point_count"],
         ),
     )
@@ -175,20 +186,42 @@ def match_target_cluster(
     max_angle_error_deg: float,
     max_distance_error_m: float,
     max_width_error_m: float,
+    max_depth_error_m: float = 0.20,
+    max_point_ratio_error: float = 0.65,
 ) -> dict | None:
     best_cluster = None
     best_score = None
+    target_depth = float(target_signature.get("radial_depth_m", 0.0))
+    target_points = max(1, int(target_signature.get("point_count", 1)))
+    target_min_distance = float(target_signature.get("min_distance_m", target_signature["centroid_distance_m"]))
     for cluster in clusters:
         angle_error = abs(cluster["centroid_angle_deg"] - target_signature["centroid_angle_deg"])
         distance_error = abs(cluster["centroid_distance_m"] - target_signature["centroid_distance_m"])
+        min_distance_error = abs(cluster["min_distance"] - target_min_distance)
         width_error = abs(cluster["width_m"] - target_signature["width_m"])
+        depth_error = abs((cluster["max_distance"] - cluster["min_distance"]) - target_depth)
+        point_ratio_error = abs(cluster["point_count"] - target_points) / float(target_points)
         if angle_error > max_angle_error_deg:
             continue
         if distance_error > max_distance_error_m:
             continue
+        if min_distance_error > max_distance_error_m:
+            continue
         if width_error > max_width_error_m:
             continue
-        score = angle_error * 1.6 + distance_error * 3.5 + width_error * 2.0 - cluster["point_count"] * 0.02
+        if depth_error > max_depth_error_m:
+            continue
+        if point_ratio_error > max_point_ratio_error:
+            continue
+        score = (
+            angle_error * 1.8
+            + min_distance_error * 5.0
+            + distance_error * 2.2
+            + width_error * 3.0
+            + depth_error * 2.8
+            + point_ratio_error * 1.2
+            - cluster["point_count"] * 0.015
+        )
         if best_score is None or score < best_score:
             best_score = score
             best_cluster = cluster
@@ -199,6 +232,9 @@ def update_target_signature(previous: dict, cluster: dict, alpha: float = 0.35) 
     return {
         "centroid_angle_deg": (1.0 - alpha) * previous["centroid_angle_deg"] + alpha * cluster["centroid_angle_deg"],
         "centroid_distance_m": (1.0 - alpha) * previous["centroid_distance_m"] + alpha * cluster["centroid_distance_m"],
+        "min_distance_m": (1.0 - alpha) * previous["min_distance_m"] + alpha * cluster["min_distance"],
         "width_m": (1.0 - alpha) * previous["width_m"] + alpha * cluster["width_m"],
+        "radial_depth_m": (1.0 - alpha) * previous["radial_depth_m"] + alpha * (cluster["max_distance"] - cluster["min_distance"]),
+        "angle_span_deg": (1.0 - alpha) * previous["angle_span_deg"] + alpha * cluster["angle_span_deg"],
         "point_count": int(round((1.0 - alpha) * previous["point_count"] + alpha * cluster["point_count"])),
     }

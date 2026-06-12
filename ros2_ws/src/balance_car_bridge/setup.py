@@ -19,6 +19,7 @@ setup(
     entry_points={
         "console_scripts": [
             "bridge_node = balance_car_bridge.bridge_node:main",
+            "control_mux_node = balance_car_bridge.control_mux_node:main",
         ],
     },
 )

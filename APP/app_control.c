@@ -4,6 +4,86 @@
 static u16 intstop_time =0 ;
 float battery = 12;//初始状态处于满电 12v The initial state is fully charged 12v
 
+static float Get_Mode_Default_Mid_Angle(void)
+{
+	switch ((uint8_t)mode)
+	{
+		case K210_Line:
+		case K210_Follow:
+		case Lidar_Follow:
+			return -1.0f;
+
+		case Normal:
+		case Weight_M:
+		default:
+			return 0.0f;
+	}
+}
+
+static void Update_Mid_Angle_Auto(int encoder_left, int encoder_right)
+{
+	static float last_angle = 0.0f;
+	static u16 stable_count = 0;
+	float default_mid_angle;
+	float angle_delta;
+	float encoder_sum;
+	float correction;
+
+	if (Balance_Run_Enabled == 0 || Stop_Flag != 0)
+	{
+		stable_count = 0;
+		last_angle = Angle_Balance;
+		return;
+	}
+
+	default_mid_angle = Get_Mode_Default_Mid_Angle();
+	angle_delta = Angle_Balance - last_angle;
+	last_angle = Angle_Balance;
+	encoder_sum = (float)(myabs(encoder_left) + myabs(encoder_right));
+
+	if (fabsf(Angle_Balance - Mid_Angle) < 10.0f &&
+		fabsf(angle_delta) < 0.12f &&
+		fabsf(Gyro_Balance) < 120.0f &&
+		encoder_sum < 40.0f &&
+		Acceleration_Z > 15000.0f)
+	{
+		if (stable_count < 400)
+		{
+			stable_count++;
+		}
+	}
+	else
+	{
+		stable_count = 0;
+	}
+
+	if (stable_count < 40)
+	{
+		return;
+	}
+
+	correction = (Angle_Balance - Mid_Angle) * 0.0025f;
+	if (correction > 0.03f)
+	{
+		correction = 0.03f;
+	}
+	else if (correction < -0.03f)
+	{
+		correction = -0.03f;
+	}
+
+	Mid_Angle += correction;
+
+	if (Mid_Angle > default_mid_angle + 6.0f)
+	{
+		Mid_Angle = default_mid_angle + 6.0f;
+	}
+	else if (Mid_Angle < default_mid_angle - 6.0f)
+	{
+		Mid_Angle = default_mid_angle - 6.0f;
+	}
+}
+
 
 //外部中断做延迟 至少10ms的延迟 此方法比delay准确
 //External interrupt delay at least 10ms This method is more accurate than delay
@@ -78,6 +158,12 @@ void EXTI15_10_IRQHandler(void)
 				Stop_Flag=1;	                           					//如果被拿起就关闭电机 If picked up, turn off the motor
 			if(Balance_Run_Enabled && Put_Down(Angle_Balance,Encoder_Left,Encoder_Right))//仅在运行态允许放车后重新起平衡 Only allow re-arming from put-down while running
 				Stop_Flag=0;	                           					//如果被放下就启动电机 If it is put down, start the motor
+		}
+
+		if(Stop_Flag==0 && Balance_Run_Enabled && battery>=9.6f &&
+		   Angle_Balance>-40.0f && Angle_Balance<angle_max)
+		{
+			Update_Mid_Angle_Auto(Encoder_Left, Encoder_Right);   //平衡稳定且未触发保护时自动修正机械中值 Auto-correct the mechanical center only while safely balancing
 		}
 		
 		if(Turn_Off(Angle_Balance,battery)==0)     					//如果不存在异常 		If there are no abnormalities
